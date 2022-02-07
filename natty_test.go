@@ -267,9 +267,58 @@ var _ = Describe("Natty", func() {
 			Expect(len(consumed)).To(Equal(5))
 			Expect(len(chanErrors)).To(Equal(5))
 		})
+	})
 
-		It("should return when context is cancelled", func() {
+	Describe("Publish", func() {
+		var (
+			cfg *Config
+			n   *Natty
+		)
 
+		BeforeEach(func() {
+			var err error
+
+			cfg = NewConfig()
+
+			n, err = New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(n).ToNot(BeNil())
+		})
+
+		It("should publish", func() {
+			// Publish stuff
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			subj := cfg.StreamName + ".bar"
+
+			payload := uuid.NewV4().String()
+
+			var hit int
+
+			// Create a consumer - expect to see a msg
+			go func() {
+				natsClient, err := nats.Connect(cfg.NatsURL[0])
+				Expect(err).ToNot(HaveOccurred())
+				Expect(natsClient).ToNot(BeNil())
+
+				js, err := natsClient.JetStream()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(js).ToNot(BeNil())
+
+				_, err = js.Subscribe(subj, func(msg *nats.Msg) {
+					hit += 1
+					Expect(string(msg.Data)).To(Equal(payload))
+					msg.Ack()
+				})
+			}()
+
+			err := n.Publish(ctx, subj, []byte(payload))
+			Expect(err).ToNot(HaveOccurred())
+
+			time.Sleep(1 * time.Second)
+
+			Expect(hit).To(Equal(1))
 		})
 	})
 })
