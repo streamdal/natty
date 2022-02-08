@@ -3,6 +3,7 @@ package natty
 
 import (
 	"context"
+	"crypto/tls"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -16,11 +17,15 @@ import (
 )
 
 const (
-	NatsURL = "nats://localhost:4222"
+	NatsURL = "tls://localhost:4222"
 )
 
 var (
 	testStreams []string
+
+	tlsConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
 )
 
 var _ = AfterSuite(func() {
@@ -41,7 +46,7 @@ var _ = Describe("Natty", func() {
 			cfg := NewConfig()
 			cfg.NatsURL = []string{
 				"nats://localhost:22",
-				"nats://localhost:4222",
+				NatsURL,
 			}
 
 			n, err := New(cfg)
@@ -298,7 +303,7 @@ var _ = Describe("Natty", func() {
 
 			// Create a consumer - expect to see a msg
 			go func() {
-				natsClient, err := nats.Connect(cfg.NatsURL[0])
+				natsClient, err := nats.Connect(cfg.NatsURL[0], nats.Secure(tlsConfig))
 				Expect(err).ToNot(HaveOccurred())
 				Expect(natsClient).ToNot(BeNil())
 
@@ -324,8 +329,7 @@ var _ = Describe("Natty", func() {
 })
 
 func Publish(cfg *Config, num int, subj, payload string) error {
-	// Connect to NATS
-	n, err := nats.Connect(cfg.NatsURL[0])
+	n, err := nats.Connect(cfg.NatsURL[0], nats.Secure(tlsConfig))
 	if err != nil {
 		return errors.Wrap(err, "unable to connect to nats in Publish()")
 	}
@@ -353,12 +357,12 @@ func NewConfig() *Config {
 		FetchSize:      1,
 		FetchTimeout:   5 * time.Second,
 		DeliverPolicy:  nats.DeliverNewPolicy,
+		TLSSkipVerify:  true,
 	}
 }
 
 func Cleanup(streams []string) error {
-	// Connect to NATS
-	n, err := nats.Connect(NatsURL)
+	n, err := nats.Connect(NatsURL, nats.Secure(tlsConfig))
 	if err != nil {
 		return errors.Wrap(err, "unable to connect to NATS")
 	}

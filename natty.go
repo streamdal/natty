@@ -2,7 +2,9 @@ package natty
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -18,7 +20,7 @@ const (
 )
 
 type INatty interface {
-	Consume(ctx context.Context, cb func(msg *nats.Msg) error) error
+	Consume(ctx context.Context, subj string, errorCh chan error, cb func(msg *nats.Msg) error) error
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
@@ -60,6 +62,9 @@ type Config struct {
 
 	// ConsumerLooper allows you to inject a looper into the library. Optional.
 	ConsumerLooper director.Looper
+
+	//
+	TLSSkipVerify bool
 }
 
 type Natty struct {
@@ -80,7 +85,16 @@ func New(cfg *Config) (*Natty, error) {
 
 	// Attempt to connect
 	for _, address := range cfg.NatsURL {
-		nc, err = nats.Connect(address)
+		if strings.HasPrefix(address, "tls://") {
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: cfg.TLSSkipVerify,
+			}
+
+			nc, err = nats.Connect(address, nats.Secure(tlsConfig))
+		} else {
+			nc, err = nats.Connect(address)
+		}
+
 		if err != nil {
 			continue
 		}
