@@ -19,4 +19,4 @@ jobs:
         with:
           time: '30s'
       - name: Master buld tests
-        run: go test ./... -v
+        run: sudo go test ./... -v
