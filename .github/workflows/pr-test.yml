@@ -16,5 +16,4 @@ jobs:
         with:
           time: '30s'
       - name: Test
-        run: |
-          go test *.go -v
+        run: go test ./... -v
