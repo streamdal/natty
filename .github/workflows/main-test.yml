@@ -19,5 +19,4 @@ jobs:
         with:
           time: '30s'
       - name: Master buld tests
-        run: |
-          go test *.go
+        run: go test ./... -v
