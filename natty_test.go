@@ -22,6 +22,7 @@ const (
 
 var (
 	testStreams []string
+	testBuckets []string
 
 	tlsConfig = &tls.Config{
 		InsecureSkipVerify: true,
@@ -29,7 +30,11 @@ var (
 )
 
 var _ = AfterSuite(func() {
-	err := Cleanup(testStreams)
+	// CleanupStreams streams
+	err := CleanupStreams(testStreams)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = CleanupBuckets(testBuckets)
 	Expect(err).ToNot(HaveOccurred())
 })
 
@@ -361,7 +366,7 @@ func NewConfig() *Config {
 	}
 }
 
-func Cleanup(streams []string) error {
+func CleanupStreams(streams []string) error {
 	n, err := nats.Connect(NatsURL, nats.Secure(tlsConfig))
 	if err != nil {
 		return errors.Wrap(err, "unable to connect to NATS")
@@ -375,6 +380,30 @@ func Cleanup(streams []string) error {
 	for _, v := range streams {
 		if err := js.DeleteStream(v); err != nil {
 			return errors.Wrap(err, "unable to delete stream "+v)
+		}
+	}
+
+	return nil
+}
+
+func CleanupBuckets(buckets []string) error {
+	n, err := nats.Connect(NatsURL, nats.Secure(tlsConfig))
+	if err != nil {
+		return errors.Wrap(err, "unable to connect to NATS")
+	}
+
+	js, err := n.JetStream()
+	if err != nil {
+		return errors.Wrap(err, "unable to create JS context")
+	}
+
+	for _, v := range buckets {
+		if err := js.DeleteKeyValue(v); err != nil {
+			if err == nats.ErrStreamNotFound {
+				continue
+			}
+
+			return errors.Wrap(err, "unable to delete bucket")
 		}
 	}
 
