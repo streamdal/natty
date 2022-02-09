@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -20,8 +21,33 @@ const (
 )
 
 type INatty interface {
+	// Consume subscribes to given subject and executes callback every time a
+	// message is received. This is a blocking call; cancellation should be
+	// performed via the context.
 	Consume(ctx context.Context, subj string, errorCh chan error, cb func(msg *nats.Msg) error) error
+
+	// Publish publishes a single message with the given subject
 	Publish(ctx context.Context, subject string, data []byte) error
+
+	// NATS key/value Get/Put/Delete/Update functionality operates on "buckets"
+	// that are exposed via a 'KeyValue' instance. To simplify our interface,
+	// our Put method will automatically create the bucket if it does not already
+	// exist. Get() and Delete() will not automatically create a bucket.
+	//
+	// If your functionality is creating many ephemeral buckets, you may want to
+	// delete the bucket after you are done via DeleteBucket().
+
+	// Get will fetch the value for a given bucket and key. Will NOT auto-create
+	// bucket if it does not exist.
+	Get(ctx context.Context, bucket string, key string) ([]byte, error)
+
+	// Put will put a new value for a given bucket and key. Will auto-create
+	// the bucket if it does not already exist.
+	Put(ctx context.Context, bucket string, key string, data []byte) error
+
+	// Delete will delete a key from a given bucket. Will no-op if the bucket
+	// or key does not exist.
+	Delete(ctx context.Context, bucket string, key string) error
 }
 
 type Config struct {
@@ -63,7 +89,7 @@ type Config struct {
 	// ConsumerLooper allows you to inject a looper into the library. Optional.
 	ConsumerLooper director.Looper
 
-	//
+	// Do not perform server certificate checks
 	TLSSkipVerify bool
 }
 
@@ -71,6 +97,8 @@ type Natty struct {
 	js             nats.JetStreamContext
 	consumerLooper director.Looper
 	config         *Config
+	kvMap          *KeyValueMap
+	kvMutex        *sync.RWMutex
 	log            Logger
 }
 
@@ -132,6 +160,10 @@ func New(cfg *Config) (*Natty, error) {
 	n := &Natty{
 		js:     js,
 		config: cfg,
+		kvMap: &KeyValueMap{
+			rwMutex: &sync.RWMutex{},
+			kvMap:   make(map[string]nats.KeyValue),
+		},
 	}
 
 	if cfg.ConsumerLooper == nil {
