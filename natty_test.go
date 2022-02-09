@@ -63,12 +63,14 @@ var _ = Describe("Natty", func() {
 			type scenario struct {
 				cfg         *Config
 				description string
+				shouldError bool
 			}
 
 			configs := []scenario{
 				{
 					cfg:         nil,
 					description: "should fail with nil config",
+					shouldError: true,
 				},
 
 				{
@@ -83,6 +85,7 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 					},
 					description: "should fail with nil nats url",
+					shouldError: true,
 				},
 
 				{
@@ -96,6 +99,7 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 					},
 					description: "should fail with nil stream subjects",
+					shouldError: true,
 				},
 
 				{
@@ -109,13 +113,32 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 					},
 					description: "should fail with empty consumer name",
+					shouldError: true,
+				},
+
+				{
+					cfg: &Config{
+						NatsURL:        []string{"tls://localhost:4222"},
+						StreamSubjects: nil,
+						ConsumerName:   "",
+						NoConsumer:     true,
+						TLSSkipVerify:  true,
+					},
+					description: "should not error on consumer config and subject settings when NoConsumer is set",
+					shouldError: false,
 				},
 			}
 
 			for _, v := range configs {
 				n, err := New(v.cfg)
-				Expect(err).To(HaveOccurred(), v.description)
-				Expect(n).To(BeNil(), v.description)
+
+				if v.shouldError {
+					Expect(err).To(HaveOccurred(), v.description)
+					Expect(n).To(BeNil())
+				} else {
+					Expect(err).ToNot(HaveOccurred(), v.description)
+					Expect(n).ToNot(BeNil())
+				}
 			}
 		})
 
@@ -222,6 +245,26 @@ var _ = Describe("Natty", func() {
 
 			Expect(exit).To(BeTrue())
 			Expect(len(consumed)).To(Equal(5))
+		})
+
+		It("should not be able to consumer if NoConsumer was set", func() {
+			cfg = NewConfig()
+			cfg.NoConsumer = true
+
+			n, err := New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(n).ToNot(BeNil())
+
+			var hasExecuted bool
+
+			err = n.Consume(context.Background(), "foo", nil, func(m *nats.Msg) error {
+				hasExecuted = true
+				return nil
+			})
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("consumer disabled"))
+			Expect(hasExecuted).To(BeFalse())
 		})
 
 		It("error watch channel is used", func() {
@@ -379,6 +422,10 @@ func CleanupStreams(streams []string) error {
 
 	for _, v := range streams {
 		if err := js.DeleteStream(v); err != nil {
+			if err == nats.ErrStreamNotFound {
+				continue
+			}
+
 			return errors.Wrap(err, "unable to delete stream "+v)
 		}
 	}

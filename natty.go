@@ -3,7 +3,9 @@ package natty
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io/ioutil"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,8 @@ const (
 	DefaultFetchTimeout  = time.Second * 1
 	DefaultDeliverPolicy = nats.DeliverLastPolicy
 )
+
+type Mode int
 
 type INatty interface {
 	// Consume subscribes to given subject and executes callback every time a
@@ -51,6 +55,10 @@ type INatty interface {
 }
 
 type Config struct {
+	// NoConsumer will prevent the NATS stream + consumer from being created
+	// during library initialization via New().
+	NoConsumer bool
+
 	// NatsURL defines the NATS urls the library will attempt to connect to. If
 	// first URL fails, we will try to connect to the next one. Only fail if all
 	// URLs fail.
@@ -89,6 +97,15 @@ type Config struct {
 	// ConsumerLooper allows you to inject a looper into the library. Optional.
 	ConsumerLooper director.Looper
 
+	// TLS CA certificate file
+	TLSCACertFile string
+
+	// TLS client certificate file
+	TLSClientCertFile string
+
+	// TLS client key file
+	TLSClientKeyFile string
+
 	// Do not perform server certificate checks
 	TLSSkipVerify bool
 }
@@ -114,8 +131,12 @@ func New(cfg *Config) (*Natty, error) {
 	// Attempt to connect
 	for _, address := range cfg.NatsURL {
 		if strings.HasPrefix(address, "tls://") {
-			tlsConfig := &tls.Config{
-				InsecureSkipVerify: cfg.TLSSkipVerify,
+			var tlsConfig *tls.Config
+
+			tlsConfig, err = GenerateTLSConfig(cfg.TLSCACertFile, cfg.TLSClientKeyFile, cfg.TLSClientCertFile, cfg.TLSSkipVerify)
+			if err != nil {
+				err = errors.Wrap(err, "failed to generate TLS config")
+				continue
 			}
 
 			nc, err = nats.Connect(address, nats.Secure(tlsConfig))
@@ -124,10 +145,13 @@ func New(cfg *Config) (*Natty, error) {
 		}
 
 		if err != nil {
+			fmt.Printf("unable to connect to '%s': %s\n", address, err)
+
 			continue
 		}
 
 		connected = true
+		break
 	}
 
 	if !connected {
@@ -138,6 +162,29 @@ func New(cfg *Config) (*Natty, error) {
 	js, err := nc.JetStream()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create jetstream context")
+	}
+
+	n := &Natty{
+		js:     js,
+		config: cfg,
+		kvMap: &KeyValueMap{
+			rwMutex: &sync.RWMutex{},
+			kvMap:   make(map[string]nats.KeyValue),
+		},
+	}
+
+	// Inject looper (if provided)
+	if cfg.ConsumerLooper == nil {
+		n.consumerLooper = director.NewFreeLooper(director.FOREVER, make(chan error, 1))
+	}
+
+	// Inject logger (if provided)
+	if cfg.Logger == nil {
+		n.log = &NoOpLogger{}
+	}
+
+	if cfg.NoConsumer {
+		return n, nil
 	}
 
 	// Create stream
@@ -157,28 +204,51 @@ func New(cfg *Config) (*Natty, error) {
 		return nil, errors.Wrap(err, "unable to create consumer")
 	}
 
-	n := &Natty{
-		js:     js,
-		config: cfg,
-		kvMap: &KeyValueMap{
-			rwMutex: &sync.RWMutex{},
-			kvMap:   make(map[string]nats.KeyValue),
-		},
-	}
-
-	if cfg.ConsumerLooper == nil {
-		n.consumerLooper = director.NewFreeLooper(director.FOREVER, make(chan error, 1))
-	}
-
-	if cfg.Logger == nil {
-		n.log = &NoOpLogger{}
-	}
-
 	return n, nil
+}
+
+func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkipVerify bool) (*tls.Config, error) {
+	if caCertFile == "" && clientKeyFile == "" && clientCertFile == "" {
+		return &tls.Config{
+			InsecureSkipVerify: tlsSkipVerify,
+		}, nil
+	}
+
+	certpool := x509.NewCertPool()
+
+	pemCerts, err := ioutil.ReadFile(caCertFile)
+	if err == nil {
+		certpool.AppendCertsFromPEM(pemCerts)
+	}
+
+	// Import client certificate/key pair
+	cert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to load ssl keypair")
+	}
+
+	// Just to print out the client certificate..
+	cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to parse certificate")
+	}
+
+	// Create tls.Config with desired tls properties
+	return &tls.Config{
+		RootCAs:            certpool,
+		ClientAuth:         tls.NoClientCert,
+		ClientCAs:          nil,
+		InsecureSkipVerify: tlsSkipVerify,
+		Certificates:       []tls.Certificate{cert},
+	}, nil
 }
 
 // Consume will create a durable consumer and consume messages from the configured stream
 func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f func(msg *nats.Msg) error) error {
+	if n.config.NoConsumer {
+		return errors.New("consumer disabled")
+	}
+
 	sub, err := n.js.PullSubscribe(subj, n.config.ConsumerName)
 	if err != nil {
 		return errors.Wrap(err, "unable to create subscription")
@@ -267,12 +337,14 @@ func validateConfig(cfg *Config) error {
 		return errors.New("NatsURL cannot be empty")
 	}
 
-	if cfg.StreamName == "" {
-		return errors.New("StreamName cannot be empty")
-	}
+	if !cfg.NoConsumer {
+		if cfg.StreamName == "" {
+			return errors.New("StreamName cannot be empty")
+		}
 
-	if len(cfg.StreamSubjects) == 0 {
-		return errors.New("StreamSubjects cannot be empty")
+		if len(cfg.StreamSubjects) == 0 {
+			return errors.New("StreamSubjects cannot be empty")
+		}
 	}
 
 	if cfg.MaxMsgs == 0 {
