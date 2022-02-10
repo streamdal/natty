@@ -28,7 +28,7 @@ type INatty interface {
 	// Consume subscribes to given subject and executes callback every time a
 	// message is received. This is a blocking call; cancellation should be
 	// performed via the context.
-	Consume(ctx context.Context, subj string, errorCh chan error, cb func(msg *nats.Msg) error) error
+	Consume(ctx context.Context, subj string, errorCh chan error, cb func(ctx context.Context, msg *nats.Msg) error) error
 
 	// Publish publishes a single message with the given subject
 	Publish(ctx context.Context, subject string, data []byte) error
@@ -244,7 +244,7 @@ func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkip
 }
 
 // Consume will create a durable consumer and consume messages from the configured stream
-func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f func(msg *nats.Msg) error) error {
+func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f func(ctx context.Context, msg *nats.Msg) error) error {
 	if n.config.NoConsumer {
 		return errors.New("consumer disabled")
 	}
@@ -295,7 +295,7 @@ func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f 
 		}
 
 		for _, v := range msgs {
-			if err := f(v); err != nil {
+			if err := f(ctx, v); err != nil {
 				n.report(errorCh, fmt.Errorf("callback func failed during message processing (stream: '%s', subj: '%s', msg: '%s'): %s",
 					n.config.StreamName, subj, v.Data, err))
 			}

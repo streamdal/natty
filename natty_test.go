@@ -210,7 +210,7 @@ var _ = Describe("Natty", func() {
 			// Launch consumer in a goroutine
 			go func() {
 
-				err := n.Consume(ctx, subj, errChan, func(msg *nats.Msg) error {
+				err := n.Consume(ctx, subj, errChan, func(ctx context.Context, msg *nats.Msg) error {
 					consumed = append(consumed, string(msg.Data))
 					return nil
 				})
@@ -257,7 +257,7 @@ var _ = Describe("Natty", func() {
 
 			var hasExecuted bool
 
-			err = n.Consume(context.Background(), "foo", nil, func(m *nats.Msg) error {
+			err = n.Consume(context.Background(), "foo", nil, func(ctx context.Context, m *nats.Msg) error {
 				hasExecuted = true
 				return nil
 			})
@@ -281,7 +281,7 @@ var _ = Describe("Natty", func() {
 			// Launch consumer in a goroutine
 			go func() {
 
-				err := n.Consume(ctx, subj, errChan, func(msg *nats.Msg) error {
+				err := n.Consume(ctx, subj, errChan, func(ctx context.Context, msg *nats.Msg) error {
 					consumed = append(consumed, string(msg.Data))
 					return errors.New("stuff broke")
 				})
