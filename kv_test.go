@@ -2,6 +2,8 @@
 package natty
 
 import (
+	"time"
+
 	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -76,6 +78,28 @@ var _ = Describe("KV", func() {
 
 			// Values should match
 			Expect(kve.Value()).To(Equal(value))
+		})
+
+		It("a key with a TTL will get auto expired", func() {
+			bucket, key, value := NewKVSet()
+
+			putErr := n.Put(nil, bucket, key, value, 1*time.Second)
+			Expect(putErr).ToNot(HaveOccurred())
+
+			// Bucket should've been created
+			kv, err := n.js.KeyValue(bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).NotTo(BeNil())
+
+			// Wait a couple sec
+			time.Sleep(2 * time.Second)
+
+			// K/V should no longer be there
+			kve, err := kv.Get(key)
+			Expect(err).To(HaveOccurred())
+			Expect(kve).To(BeNil())
+			Expect(err).To(Equal(nats.ErrKeyNotFound))
+
 		})
 	})
 
