@@ -176,12 +176,16 @@ func New(cfg *Config) (*Natty, error) {
 	}
 
 	// Inject looper (if provided)
-	if cfg.ConsumerLooper == nil {
+	n.consumerLooper = cfg.ConsumerLooper
+
+	if n.consumerLooper == nil {
 		n.consumerLooper = director.NewFreeLooper(director.FOREVER, make(chan error, 1))
 	}
 
 	// Inject logger (if provided)
-	if cfg.Logger == nil {
+	n.log = cfg.Logger
+
+	if n.log == nil {
 		n.log = &NoOpLogger{}
 	}
 
