@@ -61,16 +61,18 @@ var _ = Describe("Natty", func() {
 
 		It("should fail with bad config options", func() {
 			type scenario struct {
-				cfg         *Config
-				description string
-				shouldError bool
+				cfg           *Config
+				description   string
+				shouldError   bool
+				errorContains string
 			}
 
 			configs := []scenario{
 				{
-					cfg:         nil,
-					description: "should fail with nil config",
-					shouldError: true,
+					cfg:           nil,
+					description:   "should fail with nil config",
+					shouldError:   true,
+					errorContains: "config cannot be nil",
 				},
 
 				{
@@ -85,8 +87,9 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 						UseTLS:         true,
 					},
-					description: "should fail with nil nats url",
-					shouldError: true,
+					description:   "should fail with nil nats url",
+					shouldError:   true,
+					errorContains: "NatsURL cannot be empty",
 				},
 
 				{
@@ -100,13 +103,14 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 						UseTLS:         true,
 					},
-					description: "should fail with nil stream subjects",
-					shouldError: true,
+					description:   "should fail with nil stream subjects",
+					shouldError:   true,
+					errorContains: "StreamName cannot be empty",
 				},
 
 				{
 					cfg: &Config{
-						NatsURL:        []string{"asdf"},
+						NatsURL:        []string{"tls://localhost:4222"},
 						StreamSubjects: []string{"asdf"},
 						ConsumerName:   "",
 						MaxMsgs:        0,
@@ -115,8 +119,9 @@ var _ = Describe("Natty", func() {
 						DeliverPolicy:  0,
 						UseTLS:         true,
 					},
-					description: "should fail with empty consumer name",
-					shouldError: true,
+					description:   "should fail with empty consumer name",
+					shouldError:   true,
+					errorContains: "ConsumerName cannot be empty",
 				},
 
 				{
@@ -139,6 +144,7 @@ var _ = Describe("Natty", func() {
 				if v.shouldError {
 					Expect(err).To(HaveOccurred(), v.description)
 					Expect(n).To(BeNil())
+					Expect(err.Error()).To(ContainSubstring(v.errorContains), v.description)
 				} else {
 					Expect(err).ToNot(HaveOccurred(), v.description)
 					Expect(n).ToNot(BeNil())
@@ -249,6 +255,10 @@ var _ = Describe("Natty", func() {
 
 			Expect(exit).To(BeTrue())
 			Expect(len(consumed)).To(Equal(5))
+		})
+
+		It("uses the filter subject", func() {
+			// TODO: Do this :)
 		})
 
 		It("should not be able to consumer if NoConsumer was set", func() {
