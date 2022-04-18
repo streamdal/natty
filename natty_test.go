@@ -388,6 +388,45 @@ var _ = Describe("Natty", func() {
 			Expect(hit).To(Equal(1))
 		})
 	})
+
+	Describe("CreateStream", func() {
+		It("should create a stream", func() {
+			cfg := &Config{
+				NatsURL:       []string{NatsURL},
+				UseTLS:        true,
+				TLSSkipVerify: true,
+			}
+
+			n, err := New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			name := "ingest-4beb5666-2e30-4b28-a87e-6222731601ec"
+			err = n.CreateStream(name)
+			Expect(err).ToNot(HaveOccurred())
+
+			CleanupStreams([]string{name})
+		})
+	})
+
+	Describe("DeleteStream", func() {
+		It("should delete a stream", func() {
+			cfg := &Config{
+				NatsURL:       []string{NatsURL},
+				UseTLS:        true,
+				TLSSkipVerify: true,
+			}
+
+			n, err := New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			name := "ingest-4beb5666-2e30-4b28-a87e-6222731601ec"
+			err = n.CreateStream(name)
+			Expect(err).ToNot(HaveOccurred())
+
+			err = n.DeleteStream(name)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
 })
 
 func Publish(cfg *Config, num int, subj, payload string) error {

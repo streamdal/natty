@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/relistan/go-director"
+	uuid "github.com/satori/go.uuid"
 )
 
 const (
@@ -19,6 +20,13 @@ const (
 	DefaultFetchSize     = 100
 	DefaultFetchTimeout  = time.Second * 1
 	DefaultDeliverPolicy = nats.DeliverLastPolicy
+	DefaultSubBatchSize  = 256
+)
+
+var (
+	ErrEmptyStreamName   = errors.New("StreamName cannot be empty")
+	ErrEmptyConsumerName = errors.New("ConsumerName cannot be empty")
+	ErrEmptySubject      = errors.New("Subject cannot be empty")
 )
 
 type Mode int
@@ -27,7 +35,7 @@ type INatty interface {
 	// Consume subscribes to given subject and executes callback every time a
 	// message is received. This is a blocking call; cancellation should be
 	// performed via the context.
-	Consume(ctx context.Context, subj string, errorCh chan error, cb func(ctx context.Context, msg *nats.Msg) error) error
+	Consume(ctx context.Context, subj, streamName, consumerName string, errorCh chan error, cb func(ctx context.Context, msg *nats.Msg) error) error
 
 	// Publish publishes a single message with the given subject
 	Publish(ctx context.Context, subject string, data []byte) error
@@ -51,32 +59,25 @@ type INatty interface {
 	// Delete will delete a key from a given bucket. Will no-op if the bucket
 	// or key does not exist.
 	Delete(ctx context.Context, bucket string, key string) error
+
+	// CreateStream creates a new stream if it does not exist
+	CreateStream(name string) error
+
+	// DeleteStream deletes an existing stream
+	DeleteStream(name string) error
+
+	// CreateConsumer creates a new consumer if it does not exist
+	CreateConsumer(streamName, consumerName string) error
+
+	// DeleteConsumer deletes an existing consumer
+	DeleteConsumer(consumerName, streamName string) error
 }
 
 type Config struct {
-	// NoConsumer will prevent the NATS stream + consumer from being created
-	// during library initialization via New().
-	NoConsumer bool
-
 	// NatsURL defines the NATS urls the library will attempt to connect to. Iff
 	// first URL fails, we will try to connect to the next one. Only fail if all
 	// URLs fail.
 	NatsURL []string
-
-	// StreamName is the name of the stream the library will attempt to create.
-	// Stream creation will NOOP if the stream already exists.
-	StreamName string
-
-	// StreamSubjects defines the subjects that the stream will listen to.
-	StreamSubjects []string
-
-	// ConsumerName defines the name of the consumer the library will create.
-	// NOTE: The library *always* creates durable consumers.
-	ConsumerName string
-
-	// ConsumerFilterSubject is useful for wildcard streams - it will ensure
-	// that a consumer only receives messages that match the subject filter
-	ConsumerFilterSubject string
 
 	// MaxMsgs defines the maximum number of messages a stream will contain.
 	MaxMsgs int64
@@ -97,9 +98,6 @@ type Config struct {
 	// Logger allows you to inject a logger into the library. Optional.
 	Logger Logger
 
-	// ConsumerLooper allows you to inject a looper into the library. Optional.
-	ConsumerLooper director.Looper
-
 	// Whether to use TLS
 	UseTLS bool
 
@@ -116,12 +114,49 @@ type Config struct {
 	TLSSkipVerify bool
 }
 
+// ConsumerConfig is used to pass configuration options to Consume()
+type ConsumerConfig struct {
+	// Subject is the subject to consume off of a stream
+	Subject string
+
+	// StreamName is the name of JS stream to consume from.
+	// This should first be created with CreateStream()
+	StreamName string
+
+	// ConsumerName is the consumer that was made with CreateConsumer()
+	ConsumerName string
+
+	// Looper is optional, if none is provided, one will be created
+	Looper director.Looper
+
+	// ErrorCh is used to retrieve any errors returned in the consumer looper
+	ErrorCh chan error
+}
+
+type Publisher struct {
+	ID         string
+	QueueMutex *sync.RWMutex
+	Queue      []*message
+	nc         *nats.Conn
+	looper     director.Looper
+	log        Logger
+}
+
+// message is a convenience struct to hold message data for a batch
+type message struct {
+	Subject string
+	Value   []byte
+}
+
 type Natty struct {
+	nc             *nats.Conn
 	js             nats.JetStreamContext
 	consumerLooper director.Looper
 	config         *Config
 	kvMap          *KeyValueMap
 	kvMutex        *sync.RWMutex
+	publisherMutex *sync.RWMutex
+	publisherMap   map[string]*Publisher
 	log            Logger
 }
 
@@ -171,19 +206,15 @@ func New(cfg *Config) (*Natty, error) {
 	}
 
 	n := &Natty{
+		nc:     nc,
 		js:     js,
 		config: cfg,
 		kvMap: &KeyValueMap{
 			rwMutex: &sync.RWMutex{},
 			kvMap:   make(map[string]nats.KeyValue),
 		},
-	}
-
-	// Inject looper (if provided)
-	n.consumerLooper = cfg.ConsumerLooper
-
-	if n.consumerLooper == nil {
-		n.consumerLooper = director.NewFreeLooper(director.FOREVER, make(chan error, 1))
+		publisherMutex: &sync.RWMutex{},
+		publisherMap:   make(map[string]*Publisher),
 	}
 
 	// Inject logger (if provided)
@@ -193,29 +224,36 @@ func New(cfg *Config) (*Natty, error) {
 		n.log = &NoOpLogger{}
 	}
 
-	if cfg.NoConsumer {
-		return n, nil
-	}
-
-	// Create stream
-	if _, err := js.AddStream(&nats.StreamConfig{
-		Name:     cfg.StreamName,
-		Subjects: cfg.StreamSubjects,
-		MaxMsgs:  cfg.MaxMsgs,
-	}); err != nil {
-		return nil, errors.Wrap(err, "unable to create stream")
-	}
-
-	// Create consumer
-	if _, err := js.AddConsumer(cfg.StreamName, &nats.ConsumerConfig{
-		Durable:       cfg.ConsumerName,
-		AckPolicy:     nats.AckExplicitPolicy,
-		FilterSubject: cfg.ConsumerFilterSubject,
-	}); err != nil {
-		return nil, errors.Wrap(err, "unable to create consumer")
-	}
-
 	return n, nil
+}
+
+func (n *Natty) DeleteStream(name string) error {
+	return n.js.DeleteStream(name)
+}
+
+func (n *Natty) CreateStream(name string) error {
+	// Check if stream exists
+	_, err := n.js.StreamInfo(name)
+	if err == nil {
+		// We have a stream already, nothing else to do
+		return nil
+	} else if !errors.Is(err, nats.ErrStreamNotFound) {
+		return errors.Wrap(err, "unable to create stream")
+	}
+
+	_, err = n.js.AddStream(&nats.StreamConfig{
+		Name:      name,
+		Subjects:  []string{name},
+		Retention: nats.LimitsPolicy,   // Limit to age
+		MaxAge:    time.Hour * 24 * 30, // 30 days max retention
+		Storage:   nats.FileStorage,    // Store on disk
+
+	})
+	if err != nil {
+		return errors.Wrap(err, "unable to create stream")
+	}
+
+	return nil
 }
 
 func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkipVerify bool) (*tls.Config, error) {
@@ -265,13 +303,37 @@ func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkip
 	}, nil
 }
 
-// Consume will create a durable consumer and consume messages from the configured stream
-func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f func(ctx context.Context, msg *nats.Msg) error) error {
-	if n.config.NoConsumer {
-		return errors.New("consumer disabled")
+func (n *Natty) CreateConsumer(streamName, consumerName string) error {
+	if _, err := n.js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   consumerName,
+		AckPolicy: nats.AckExplicitPolicy,
+	}); err != nil {
+		// TODO: what happens if the consumer already exists? Does it error
+		return errors.Wrap(err, "unable to create consumer")
 	}
 
-	sub, err := n.js.PullSubscribe(subj, n.config.ConsumerName)
+	return nil
+}
+
+func (n *Natty) DeleteConsumer(consumerName, streamName string) error {
+	if err := n.js.DeleteConsumer(streamName, consumerName); err != nil {
+		return errors.Wrap(err, "unable to delete consumer")
+	}
+
+	return nil
+}
+
+// Consume will create a durable consumer and consume messages from the configured stream
+func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx context.Context, msg *nats.Msg) error) error {
+	if err := validateConsumerConfig(cfg); err != nil {
+		return errors.Wrap(err, "invalid consumer config")
+	}
+
+	if _, ok := ctx.Deadline(); !ok {
+		return errors.New("context must have a deadline to work with NATS")
+	}
+
+	sub, err := n.js.PullSubscribe(cfg.Subject, cfg.ConsumerName)
 	if err != nil {
 		return errors.Wrap(err, "unable to create subscription")
 	}
@@ -279,13 +341,13 @@ func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f 
 	defer func() {
 		if err := sub.Unsubscribe(); err != nil {
 			n.log.Errorf("unable to unsubscribe from (stream: '%s', subj: '%s'): %s",
-				n.config.StreamName, subj, err)
+				cfg.StreamName, cfg.Subject, err)
 		}
 	}()
 
 	var quit bool
 
-	n.consumerLooper.Loop(func() error {
+	cfg.Looper.Loop(func() error {
 		// This is needed to prevent context flood in case .Quit() wasn't picked
 		// up quickly enough by director
 		if quit {
@@ -297,9 +359,9 @@ func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f 
 		if err != nil {
 			if err == context.Canceled {
 				n.log.Debugf("context canceled (stream: %s, subj: %s)",
-					n.config.StreamName, subj)
+					cfg.StreamName, cfg.Subject)
 
-				n.consumerLooper.Quit()
+				cfg.Looper.Quit()
 				quit = true
 
 				return nil
@@ -310,34 +372,34 @@ func (n *Natty) Consume(ctx context.Context, subj string, errorCh chan error, f 
 				return nil
 			}
 
-			n.report(errorCh, fmt.Errorf("unable to fetch messages from (stream: '%s', subj: '%s'): %s",
-				n.config.StreamName, subj, err))
+			n.report(cfg.ErrorCh, fmt.Errorf("unable to fetch messages from (stream: '%s', subj: '%s'): %s",
+				cfg.StreamName, cfg.Subject, err))
 
 			return nil
 		}
 
 		for _, v := range msgs {
 			if err := f(ctx, v); err != nil {
-				n.report(errorCh, fmt.Errorf("callback func failed during message processing (stream: '%s', subj: '%s', msg: '%s'): %s",
-					n.config.StreamName, subj, v.Data, err))
+				n.report(cfg.ErrorCh, fmt.Errorf("callback func failed during message processing (stream: '%s', subj: '%s', msg: '%s'): %s",
+					cfg.StreamName, cfg.Subject, v.Data, err))
 			}
 		}
 
 		return nil
 	})
 
-	n.log.Debugf("consumer exiting (stream: %s, subj: %s)", n.config.StreamName, subj)
+	n.log.Debugf("consumer exiting (stream: %s, subj: %s)", cfg.StreamName, cfg.Subject)
 
 	return nil
 }
 
-func (n *Natty) Publish(ctx context.Context, subj string, msg []byte) error {
-	if _, err := n.js.Publish(subj, msg, nats.Context(ctx)); err != nil {
-		return errors.Wrap(err, "unable to publish message")
-	}
-
-	return nil
-}
+//func (n *Natty) Publish(ctx context.Context, subj string, msg []byte) error {
+//	if _, err := n.js.Publish(subj, msg, nats.Context(ctx)); err != nil {
+//		return errors.Wrap(err, "unable to publish message")
+//	}
+//
+//	return nil
+//}
 
 func (n *Natty) report(errorCh chan error, err error) {
 	if errorCh != nil {
@@ -359,20 +421,6 @@ func validateConfig(cfg *Config) error {
 		return errors.New("NatsURL cannot be empty")
 	}
 
-	if !cfg.NoConsumer {
-		if cfg.ConsumerName == "" {
-			return errors.New("ConsumerName cannot be empty")
-		}
-
-		if cfg.StreamName == "" {
-			return errors.New("StreamName cannot be empty")
-		}
-
-		if len(cfg.StreamSubjects) == 0 {
-			return errors.New("StreamSubjects cannot be empty")
-		}
-	}
-
 	if cfg.MaxMsgs == 0 {
 		cfg.MaxMsgs = DefaultMaxMsgs
 	}
@@ -387,6 +435,160 @@ func validateConfig(cfg *Config) error {
 
 	if cfg.DeliverPolicy == 0 {
 		cfg.DeliverPolicy = DefaultDeliverPolicy
+	}
+
+	return nil
+}
+
+func validateConsumerConfig(cfg *ConsumerConfig) error {
+	if cfg.StreamName == "" {
+		return ErrEmptyStreamName
+	}
+
+	if cfg.ConsumerName == "" {
+		return ErrEmptyConsumerName
+	}
+
+	if cfg.Subject == "" {
+		return ErrEmptySubject
+	}
+
+	// Apply optional defaults if needed
+	if cfg.ErrorCh == nil {
+		cfg.ErrorCh = make(chan error, 1)
+	}
+
+	if cfg.Looper == nil {
+		cfg.Looper = director.NewFreeLooper(director.FOREVER, cfg.ErrorCh)
+	}
+
+	return nil
+}
+
+// ----------------------- publisher ------------------------
+
+func (n *Natty) Publish(ctx context.Context, subject string, value []byte) {
+	n.getPublisherBySubject(subject).batch(ctx, subject, value)
+}
+
+func (n *Natty) getPublisherBySubject(name string) *Publisher {
+	n.publisherMutex.Lock()
+	defer n.publisherMutex.Unlock()
+
+	p, ok := n.publisherMap[name]
+	if !ok {
+		n.log.Debugf("creating new publisher goroutine for subject '%s'", name)
+
+		p = n.newPublisher(uuid.NewV4().String())
+		n.publisherMap[name] = p
+	}
+
+	return p
+}
+
+func (n *Natty) newPublisher(id string) *Publisher {
+	return &Publisher{
+		ID:         id,
+		QueueMutex: &sync.RWMutex{},
+		Queue:      make([]*message, 0),
+		looper:     director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+		nc:         n.nc,
+		log:        n.log,
+	}
+}
+
+func (p *Publisher) batch(_ context.Context, subject string, value []byte) {
+	p.QueueMutex.Lock()
+	defer p.QueueMutex.Unlock()
+
+	p.Queue = append(p.Queue, &message{
+		Subject: subject,
+		Value:   value,
+	})
+}
+
+// TODO: needed?
+func buildBatch(slice []*message, entriesPerBatch int) [][]*message {
+	batch := make([][]*message, 0)
+
+	if len(slice) < entriesPerBatch {
+		return append(batch, slice)
+	}
+
+	// How many iterations should we have?
+	iterations := len(slice) / entriesPerBatch
+
+	// We're operating in ints - we need the remainder
+	remainder := len(slice) % entriesPerBatch
+
+	var startIndex int
+	nextIndex := entriesPerBatch
+
+	for i := 0; i != iterations; i++ {
+		batch = append(batch, slice[startIndex:nextIndex])
+
+		startIndex = nextIndex
+		nextIndex = nextIndex + entriesPerBatch
+	}
+
+	if remainder != 0 {
+		batch = append(batch, slice[startIndex:])
+	}
+
+	return batch
+}
+
+func (p *Publisher) runBatchPublisher(ctx context.Context) {
+	//var quit bool
+
+	p.log.Debugf("publisher id '%s' exiting", p.ID)
+
+	p.looper.Loop(func() error {
+		p.QueueMutex.RLock()
+		remaining := len(p.Queue)
+		p.QueueMutex.RUnlock()
+
+		if remaining == 0 {
+			// empty queue, sleep for a bit and then loop again to check for new messages
+			time.Sleep(time.Millisecond * 100)
+			return nil
+		}
+
+		p.QueueMutex.Lock()
+		batch := make([]*message, remaining)
+		copy(p.Queue, batch)
+		p.Queue = make([]*message, 0)
+		p.QueueMutex.Unlock()
+
+		if err := p.writeMessagesBatch(ctx, batch); err != nil {
+			p.log.Error(err)
+		}
+
+		return nil
+	})
+}
+
+func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
+	p.log.Debugf("creating a batch for %d messages", len(msgs))
+
+	// TODO: how to handle retry?
+	// TODO: do we need batching? Can probably be eliminated since
+
+	js, err := p.nc.JetStream(nats.PublishAsyncMaxPending(256)) // TODO: configure
+	if err != nil {
+		return errors.Wrap(err, "unable to create JetStream context")
+	}
+
+	for _, msg := range msgs {
+		js.PublishAsync(msg.Subject, msg.Value)
+	}
+
+	select {
+	case <-js.PublishAsyncComplete():
+		p.log.Debugf("Successfully published '%d' messages", len(msgs))
+		return nil
+	case <-time.After(5 * time.Second): // TODO: configurable
+		return errors.New("timed out waiting for message acknowledgement")
 	}
 
 	return nil
