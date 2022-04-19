@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	DefaultMaxMsgs       = 10_000
-	DefaultFetchSize     = 100
-	DefaultFetchTimeout  = time.Second * 1
-	DefaultDeliverPolicy = nats.DeliverLastPolicy
-	DefaultSubBatchSize  = 256
+	DefaultMaxMsgs           = 10_000
+	DefaultFetchSize         = 100
+	DefaultFetchTimeout      = time.Second * 1
+	DefaultDeliverPolicy     = nats.DeliverLastPolicy
+	DefaultSubBatchSize      = 256
+	DefaultWorkerIdleTimeout = time.Minute
 )
 
 var (
@@ -39,6 +40,8 @@ type INatty interface {
 
 	// Publish publishes a single message with the given subject
 	Publish(ctx context.Context, subject string, data []byte) error
+
+	DeletePublisher(ctx context.Context, id string)
 
 	// NATS key/value Get/Put/Delete/Update functionality operates on "buckets"
 	// that are exposed via a 'KeyValue' instance. To simplify our interface,
@@ -112,6 +115,19 @@ type Config struct {
 
 	// Do not perform server certificate checks
 	TLSSkipVerify bool
+
+	// PublishBatchSize is how many messages to async publish at once
+	// Default: 256
+	PublishBatchSize int
+
+	// ServiceShutdownContext is used by main() to shutdown services before application termination
+	ServiceShutdownContext context.Context
+
+	// MainShutdownFunc is triggered by watchForShutdown() after all publisher queues are exhausted
+	// and is used to trigger shutdown of APIs and then main()
+	MainShutdownFunc context.CancelFunc
+
+	WorkerIdleTimeout time.Duration
 }
 
 // ConsumerConfig is used to pass configuration options to Consume()
@@ -134,12 +150,24 @@ type ConsumerConfig struct {
 }
 
 type Publisher struct {
-	ID         string
-	QueueMutex *sync.RWMutex
-	Queue      []*message
-	nc         *nats.Conn
-	looper     director.Looper
-	log        Logger
+	ID          string
+	QueueMutex  *sync.RWMutex
+	Queue       []*message
+	Natty       *Natty
+	IdleTimeout time.Duration
+	nc          *nats.Conn
+	looper      director.Looper
+
+	// PublisherContext is used to close a specific publisher
+	PublisherContext context.Context
+
+	// PublisherCancel is used to cancel a specific publisher's context
+	PublisherCancel context.CancelFunc
+
+	// ServiceShutdownContext is used by main() to shutdown services before application termination
+	ServiceShutdownContext context.Context
+
+	log Logger
 }
 
 // message is a convenience struct to hold message data for a batch
@@ -149,10 +177,10 @@ type message struct {
 }
 
 type Natty struct {
+	*Config
 	nc             *nats.Conn
 	js             nats.JetStreamContext
 	consumerLooper director.Looper
-	config         *Config
 	kvMap          *KeyValueMap
 	kvMutex        *sync.RWMutex
 	publisherMutex *sync.RWMutex
@@ -208,7 +236,7 @@ func New(cfg *Config) (*Natty, error) {
 	n := &Natty{
 		nc:     nc,
 		js:     js,
-		config: cfg,
+		Config: cfg,
 		kvMap: &KeyValueMap{
 			rwMutex: &sync.RWMutex{},
 			kvMap:   make(map[string]nats.KeyValue),
@@ -231,7 +259,7 @@ func (n *Natty) DeleteStream(name string) error {
 	return n.js.DeleteStream(name)
 }
 
-func (n *Natty) CreateStream(name string) error {
+func (n *Natty) CreateStream(name string, subjects []string) error {
 	// Check if stream exists
 	_, err := n.js.StreamInfo(name)
 	if err == nil {
@@ -243,7 +271,7 @@ func (n *Natty) CreateStream(name string) error {
 
 	_, err = n.js.AddStream(&nats.StreamConfig{
 		Name:      name,
-		Subjects:  []string{name},
+		Subjects:  subjects,
 		Retention: nats.LimitsPolicy,   // Limit to age
 		MaxAge:    time.Hour * 24 * 30, // 30 days max retention
 		Storage:   nats.FileStorage,    // Store on disk
@@ -329,9 +357,9 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 		return errors.Wrap(err, "invalid consumer config")
 	}
 
-	if _, ok := ctx.Deadline(); !ok {
-		return errors.New("context must have a deadline to work with NATS")
-	}
+	//if _, ok := ctx.Deadline(); !ok {
+	//	return errors.New("context must have a deadline to work with NATS")
+	//}
 
 	sub, err := n.js.PullSubscribe(cfg.Subject, cfg.ConsumerName)
 	if err != nil {
@@ -355,7 +383,7 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 			return nil
 		}
 
-		msgs, err := sub.Fetch(n.config.FetchSize, nats.Context(ctx))
+		msgs, err := sub.Fetch(n.FetchSize, nats.Context(ctx))
 		if err != nil {
 			if err == context.Canceled {
 				n.log.Debugf("context canceled (stream: %s, subj: %s)",
@@ -437,6 +465,13 @@ func validateConfig(cfg *Config) error {
 		cfg.DeliverPolicy = DefaultDeliverPolicy
 	}
 
+	if cfg.PublishBatchSize == 0 {
+		cfg.PublishBatchSize = DefaultSubBatchSize
+	}
+	if cfg.WorkerIdleTimeout == 0 {
+		cfg.WorkerIdleTimeout = DefaultWorkerIdleTimeout
+	}
+
 	return nil
 }
 
@@ -471,6 +506,34 @@ func (n *Natty) Publish(ctx context.Context, subject string, value []byte) {
 	n.getPublisherBySubject(subject).batch(ctx, subject, value)
 }
 
+// DeletePublisher will stop the batch publisher goroutine and remove the
+// publisher from the shared publisher map.
+//
+// It is safe to call this if a publisher for the topic does not exist.
+//
+// Returns bool which indicate if publisher exists.
+func (n *Natty) DeletePublisher(ctx context.Context, topic string) bool {
+	n.publisherMutex.RLock()
+	publisher, ok := n.publisherMap[topic]
+	n.publisherMutex.RUnlock()
+
+	if !ok {
+		n.log.Debugf("publisher for topic '%s' not found", topic)
+		return false
+	}
+
+	n.log.Debugf("found existing publisher in cache for topic '%s' - closing and removing", topic)
+
+	// Stop batch publisher goroutine
+	publisher.PublisherCancel()
+
+	n.publisherMutex.Lock()
+	delete(n.publisherMap, topic)
+	n.publisherMutex.Unlock()
+
+	return true
+}
+
 func (n *Natty) getPublisherBySubject(name string) *Publisher {
 	n.publisherMutex.Lock()
 	defer n.publisherMutex.Unlock()
@@ -487,13 +550,18 @@ func (n *Natty) getPublisherBySubject(name string) *Publisher {
 }
 
 func (n *Natty) newPublisher(id string) *Publisher {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Publisher{
-		ID:         id,
-		QueueMutex: &sync.RWMutex{},
-		Queue:      make([]*message, 0),
-		looper:     director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
-		nc:         n.nc,
-		log:        n.log,
+		ID:                     id,
+		QueueMutex:             &sync.RWMutex{},
+		Queue:                  make([]*message, 0),
+		looper:                 director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+		PublisherContext:       ctx,
+		PublisherCancel:        cancel,
+		ServiceShutdownContext: n.ServiceShutdownContext,
+		IdleTimeout:            n.WorkerIdleTimeout,
+		nc:                     n.nc,
+		log:                    n.log,
 	}
 }
 
@@ -539,56 +607,93 @@ func buildBatch(slice []*message, entriesPerBatch int) [][]*message {
 }
 
 func (p *Publisher) runBatchPublisher(ctx context.Context) {
-	//var quit bool
+	var quit bool
 
 	p.log.Debugf("publisher id '%s' exiting", p.ID)
+
+	lastArrivedAt := time.Now()
 
 	p.looper.Loop(func() error {
 		p.QueueMutex.RLock()
 		remaining := len(p.Queue)
 		p.QueueMutex.RUnlock()
 
-		if remaining == 0 {
+		if quit && remaining == 0 {
+			p.Natty.DeletePublisher(ctx, p.ID)
 			// empty queue, sleep for a bit and then loop again to check for new messages
 			time.Sleep(time.Millisecond * 100)
 			return nil
 		}
 
+		// Should we shutdown?
+		select {
+		case <-ctx.Done(): // DeletePublisher context
+			p.log.Debugf("publisher id '%s' received notice to quit", p.ID)
+			quit = true
+
+		case <-p.ServiceShutdownContext.Done():
+			p.log.Debugf("publisher id '%s' received app shutdown signal, waiting for batch to be empty", p.ID)
+			quit = true
+		default:
+			// NOOP
+		}
+
+		// No reason to keep goroutines running forever
+		if remaining == 0 && time.Since(lastArrivedAt) > p.IdleTimeout {
+			p.log.Debugf("idle timeout reached (%s); exiting", p.IdleTimeout)
+
+			p.Natty.DeletePublisher(ctx, p.ID)
+			return nil
+		}
+
+		if remaining == 0 {
+			// Queue is empty, nothing to do
+			return nil
+		}
+
 		p.QueueMutex.Lock()
-		batch := make([]*message, remaining)
-		copy(p.Queue, batch)
+		tmpQueue := make([]*message, len(p.Queue))
+		copy(tmpQueue, p.Queue)
 		p.Queue = make([]*message, 0)
 		p.QueueMutex.Unlock()
 
-		if err := p.writeMessagesBatch(ctx, batch); err != nil {
+		lastArrivedAt = time.Now()
+
+		if err := p.writeMessagesBatch(ctx, tmpQueue); err != nil {
 			p.log.Error(err)
 		}
 
 		return nil
 	})
+
+	p.log.Debugf("publisher id '%s' exiting", p.ID)
 }
 
 func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
 	p.log.Debugf("creating a batch for %d messages", len(msgs))
 
-	// TODO: how to handle retry?
-	// TODO: do we need batching? Can probably be eliminated since
-
-	js, err := p.nc.JetStream(nats.PublishAsyncMaxPending(256)) // TODO: configure
+	js, err := p.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
 	if err != nil {
 		return errors.Wrap(err, "unable to create JetStream context")
 	}
 
-	for _, msg := range msgs {
-		js.PublishAsync(msg.Subject, msg.Value)
-	}
+	batches := buildBatch(msgs, p.Natty.PublishBatchSize)
 
-	select {
-	case <-js.PublishAsyncComplete():
-		p.log.Debugf("Successfully published '%d' messages", len(msgs))
-		return nil
-	case <-time.After(5 * time.Second): // TODO: configurable
-		return errors.New("timed out waiting for message acknowledgement")
+	// TODO: how to handle retry?
+	for _, batch := range batches {
+		for _, msg := range batch {
+			if _, err := js.PublishAsync(msg.Subject, msg.Value); err != nil {
+				p.log.Errorf("unable to write message: %s", err)
+			}
+		}
+
+		select {
+		case <-js.PublishAsyncComplete():
+			p.log.Debugf("Successfully published '%d' messages", len(msgs))
+			return nil
+		case <-time.After(5 * time.Second): // TODO: configurable
+			p.log.Error("timed out waiting for message acknowledgement of '%d' messages", len(batch))
+		}
 	}
 
 	return nil
