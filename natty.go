@@ -155,7 +155,6 @@ type Publisher struct {
 	Queue       []*message
 	Natty       *Natty
 	IdleTimeout time.Duration
-	nc          *nats.Conn
 	looper      director.Looper
 
 	// PublisherContext is used to close a specific publisher
@@ -472,6 +471,11 @@ func validateConfig(cfg *Config) error {
 		cfg.WorkerIdleTimeout = DefaultWorkerIdleTimeout
 	}
 
+	if cfg.ServiceShutdownContext == nil {
+		ctx, _ := context.WithCancel(context.Background())
+		cfg.ServiceShutdownContext = ctx
+	}
+
 	return nil
 }
 
@@ -551,18 +555,22 @@ func (n *Natty) getPublisherBySubject(name string) *Publisher {
 
 func (n *Natty) newPublisher(id string) *Publisher {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Publisher{
+	publisher := &Publisher{
 		ID:                     id,
 		QueueMutex:             &sync.RWMutex{},
 		Queue:                  make([]*message, 0),
 		looper:                 director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
 		PublisherContext:       ctx,
 		PublisherCancel:        cancel,
+		Natty:                  n,
 		ServiceShutdownContext: n.ServiceShutdownContext,
 		IdleTimeout:            n.WorkerIdleTimeout,
-		nc:                     n.nc,
 		log:                    n.log,
 	}
+
+	go publisher.runBatchPublisher(ctx)
+
+	return publisher
 }
 
 func (p *Publisher) batch(_ context.Context, subject string, value []byte) {
@@ -671,8 +679,9 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 
 func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
 	p.log.Debugf("creating a batch for %d messages", len(msgs))
+	println("WRITING messages", len(msgs))
 
-	js, err := p.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
+	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
 	if err != nil {
 		return errors.Wrap(err, "unable to create JetStream context")
 	}
@@ -689,9 +698,11 @@ func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) err
 
 		select {
 		case <-js.PublishAsyncComplete():
+			println("AYNC COMPLETE")
 			p.log.Debugf("Successfully published '%d' messages", len(msgs))
 			return nil
 		case <-time.After(5 * time.Second): // TODO: configurable
+			println("WAIT TIMED OUT")
 			p.log.Error("timed out waiting for message acknowledgement of '%d' messages", len(batch))
 		}
 	}
