@@ -12,7 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/relistan/go-director"
-	uuid "github.com/satori/go.uuid"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 const (
@@ -22,6 +22,7 @@ const (
 	DefaultDeliverPolicy     = nats.DeliverLastPolicy
 	DefaultSubBatchSize      = 256
 	DefaultWorkerIdleTimeout = time.Minute
+	DefaultPublishTimeout    = time.Second * 5 // TODO: figure out a good value for this
 )
 
 var (
@@ -36,12 +37,25 @@ type INatty interface {
 	// Consume subscribes to given subject and executes callback every time a
 	// message is received. This is a blocking call; cancellation should be
 	// performed via the context.
-	Consume(ctx context.Context, subj, streamName, consumerName string, errorCh chan error, cb func(ctx context.Context, msg *nats.Msg) error) error
+	Consume(ctx context.Context, cfg *ConsumerConfig, cb func(ctx context.Context, msg *nats.Msg) error) error
 
 	// Publish publishes a single message with the given subject
-	Publish(ctx context.Context, subject string, data []byte) error
+	Publish(ctx context.Context, subject string, data []byte)
 
-	DeletePublisher(ctx context.Context, id string)
+	// DeletePublisher shuts down a publisher and deletes it from the internal publisherMap
+	DeletePublisher(ctx context.Context, id string) bool
+
+	// CreateStream creates a new stream if it does not exist
+	CreateStream(ctx context.Context, name string, subjects []string) error
+
+	// DeleteStream deletes an existing stream
+	DeleteStream(ctx context.Context, name string) error
+
+	// CreateConsumer creates a new consumer if it does not exist
+	CreateConsumer(ctx context.Context, streamName, consumerName string) error
+
+	// DeleteConsumer deletes an existing consumer
+	DeleteConsumer(ctx context.Context, consumerName, streamName string) error
 
 	// NATS key/value Get/Put/Delete/Update functionality operates on "buckets"
 	// that are exposed via a 'KeyValue' instance. To simplify our interface,
@@ -62,18 +76,6 @@ type INatty interface {
 	// Delete will delete a key from a given bucket. Will no-op if the bucket
 	// or key does not exist.
 	Delete(ctx context.Context, bucket string, key string) error
-
-	// CreateStream creates a new stream if it does not exist
-	CreateStream(name string) error
-
-	// DeleteStream deletes an existing stream
-	DeleteStream(name string) error
-
-	// CreateConsumer creates a new consumer if it does not exist
-	CreateConsumer(streamName, consumerName string) error
-
-	// DeleteConsumer deletes an existing consumer
-	DeleteConsumer(consumerName, streamName string) error
 }
 
 type Config struct {
@@ -128,6 +130,8 @@ type Config struct {
 	MainShutdownFunc context.CancelFunc
 
 	WorkerIdleTimeout time.Duration
+
+	PublishTimeout time.Duration
 }
 
 // ConsumerConfig is used to pass configuration options to Consume()
@@ -254,18 +258,32 @@ func New(cfg *Config) (*Natty, error) {
 	return n, nil
 }
 
-func (n *Natty) DeleteStream(name string) error {
-	return n.js.DeleteStream(name)
+func (n *Natty) DeleteStream(ctx context.Context, name string) error {
+	span, _ := tracer.StartSpanFromContext(ctx, "natty.DeleteStream")
+	defer span.Finish()
+
+	if err := n.js.DeleteStream(name); err != nil {
+		err = errors.Wrap(err, "unable to delete stream")
+		span.SetTag("error", err)
+		return err
+	}
+
+	return nil
 }
 
-func (n *Natty) CreateStream(name string, subjects []string) error {
+func (n *Natty) CreateStream(ctx context.Context, name string, subjects []string) error {
+	span, _ := tracer.StartSpanFromContext(ctx, "natty.CreateStream")
+	defer span.Finish()
+
 	// Check if stream exists
 	_, err := n.js.StreamInfo(name)
 	if err == nil {
 		// We have a stream already, nothing else to do
 		return nil
 	} else if !errors.Is(err, nats.ErrStreamNotFound) {
-		return errors.Wrap(err, "unable to create stream")
+		err = errors.Wrap(err, "unable to create stream")
+		span.SetTag("error", err)
+		return err
 	}
 
 	_, err = n.js.AddStream(&nats.StreamConfig{
@@ -277,7 +295,9 @@ func (n *Natty) CreateStream(name string, subjects []string) error {
 
 	})
 	if err != nil {
-		return errors.Wrap(err, "unable to create stream")
+		err = errors.Wrap(err, "unable to create stream")
+		span.SetTag("error", err)
+		return err
 	}
 
 	return nil
@@ -330,21 +350,30 @@ func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkip
 	}, nil
 }
 
-func (n *Natty) CreateConsumer(streamName, consumerName string) error {
+func (n *Natty) CreateConsumer(ctx context.Context, streamName, consumerName string) error {
+	span, _ := tracer.StartSpanFromContext(ctx, "natty.CreateConsumer")
+	defer span.Finish()
+
 	if _, err := n.js.AddConsumer(streamName, &nats.ConsumerConfig{
 		Durable:   consumerName,
 		AckPolicy: nats.AckExplicitPolicy,
 	}); err != nil {
-		// TODO: what happens if the consumer already exists? Does it error
-		return errors.Wrap(err, "unable to create consumer")
+		err = errors.Wrap(err, "unable to create consumer")
+		span.SetTag("error", err)
+		return err
 	}
 
 	return nil
 }
 
-func (n *Natty) DeleteConsumer(consumerName, streamName string) error {
+func (n *Natty) DeleteConsumer(ctx context.Context, consumerName, streamName string) error {
+	span, _ := tracer.StartSpanFromContext(ctx, "natty.CreateConsumer")
+	defer span.Finish()
+
 	if err := n.js.DeleteConsumer(streamName, consumerName); err != nil {
-		return errors.Wrap(err, "unable to delete consumer")
+		err = errors.Wrap(err, "unable to delete consumer")
+		span.SetTag("error", err)
+		return err
 	}
 
 	return nil
@@ -355,10 +384,6 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 	if err := validateConsumerConfig(cfg); err != nil {
 		return errors.Wrap(err, "invalid consumer config")
 	}
-
-	//if _, ok := ctx.Deadline(); !ok {
-	//	return errors.New("context must have a deadline to work with NATS")
-	//}
 
 	sub, err := n.js.PullSubscribe(cfg.Subject, cfg.ConsumerName)
 	if err != nil {
@@ -471,6 +496,10 @@ func validateConfig(cfg *Config) error {
 		cfg.WorkerIdleTimeout = DefaultWorkerIdleTimeout
 	}
 
+	if cfg.PublishTimeout == 0 {
+		cfg.PublishTimeout = DefaultPublishTimeout
+	}
+
 	if cfg.ServiceShutdownContext == nil {
 		ctx, _ := context.WithCancel(context.Background())
 		cfg.ServiceShutdownContext = ctx
@@ -499,212 +528,6 @@ func validateConsumerConfig(cfg *ConsumerConfig) error {
 
 	if cfg.Looper == nil {
 		cfg.Looper = director.NewFreeLooper(director.FOREVER, cfg.ErrorCh)
-	}
-
-	return nil
-}
-
-// ----------------------- publisher ------------------------
-
-func (n *Natty) Publish(ctx context.Context, subject string, value []byte) {
-	n.getPublisherBySubject(subject).batch(ctx, subject, value)
-}
-
-// DeletePublisher will stop the batch publisher goroutine and remove the
-// publisher from the shared publisher map.
-//
-// It is safe to call this if a publisher for the topic does not exist.
-//
-// Returns bool which indicate if publisher exists.
-func (n *Natty) DeletePublisher(ctx context.Context, topic string) bool {
-	n.publisherMutex.RLock()
-	publisher, ok := n.publisherMap[topic]
-	n.publisherMutex.RUnlock()
-
-	if !ok {
-		n.log.Debugf("publisher for topic '%s' not found", topic)
-		return false
-	}
-
-	n.log.Debugf("found existing publisher in cache for topic '%s' - closing and removing", topic)
-
-	// Stop batch publisher goroutine
-	publisher.PublisherCancel()
-
-	n.publisherMutex.Lock()
-	delete(n.publisherMap, topic)
-	n.publisherMutex.Unlock()
-
-	return true
-}
-
-func (n *Natty) getPublisherBySubject(name string) *Publisher {
-	n.publisherMutex.Lock()
-	defer n.publisherMutex.Unlock()
-
-	p, ok := n.publisherMap[name]
-	if !ok {
-		n.log.Debugf("creating new publisher goroutine for subject '%s'", name)
-
-		p = n.newPublisher(uuid.NewV4().String())
-		n.publisherMap[name] = p
-	}
-
-	return p
-}
-
-func (n *Natty) newPublisher(id string) *Publisher {
-	ctx, cancel := context.WithCancel(context.Background())
-	publisher := &Publisher{
-		ID:                     id,
-		QueueMutex:             &sync.RWMutex{},
-		Queue:                  make([]*message, 0),
-		looper:                 director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
-		PublisherContext:       ctx,
-		PublisherCancel:        cancel,
-		Natty:                  n,
-		ServiceShutdownContext: n.ServiceShutdownContext,
-		IdleTimeout:            n.WorkerIdleTimeout,
-		log:                    n.log,
-	}
-
-	go publisher.runBatchPublisher(ctx)
-
-	return publisher
-}
-
-func (p *Publisher) batch(_ context.Context, subject string, value []byte) {
-	p.QueueMutex.Lock()
-	defer p.QueueMutex.Unlock()
-
-	p.Queue = append(p.Queue, &message{
-		Subject: subject,
-		Value:   value,
-	})
-}
-
-// TODO: needed?
-func buildBatch(slice []*message, entriesPerBatch int) [][]*message {
-	batch := make([][]*message, 0)
-
-	if len(slice) < entriesPerBatch {
-		return append(batch, slice)
-	}
-
-	// How many iterations should we have?
-	iterations := len(slice) / entriesPerBatch
-
-	// We're operating in ints - we need the remainder
-	remainder := len(slice) % entriesPerBatch
-
-	var startIndex int
-	nextIndex := entriesPerBatch
-
-	for i := 0; i != iterations; i++ {
-		batch = append(batch, slice[startIndex:nextIndex])
-
-		startIndex = nextIndex
-		nextIndex = nextIndex + entriesPerBatch
-	}
-
-	if remainder != 0 {
-		batch = append(batch, slice[startIndex:])
-	}
-
-	return batch
-}
-
-func (p *Publisher) runBatchPublisher(ctx context.Context) {
-	var quit bool
-
-	p.log.Debugf("publisher id '%s' exiting", p.ID)
-
-	lastArrivedAt := time.Now()
-
-	p.looper.Loop(func() error {
-		p.QueueMutex.RLock()
-		remaining := len(p.Queue)
-		p.QueueMutex.RUnlock()
-
-		if quit && remaining == 0 {
-			p.Natty.DeletePublisher(ctx, p.ID)
-			// empty queue, sleep for a bit and then loop again to check for new messages
-			time.Sleep(time.Millisecond * 100)
-			return nil
-		}
-
-		// Should we shutdown?
-		select {
-		case <-ctx.Done(): // DeletePublisher context
-			p.log.Debugf("publisher id '%s' received notice to quit", p.ID)
-			quit = true
-
-		case <-p.ServiceShutdownContext.Done():
-			p.log.Debugf("publisher id '%s' received app shutdown signal, waiting for batch to be empty", p.ID)
-			quit = true
-		default:
-			// NOOP
-		}
-
-		// No reason to keep goroutines running forever
-		if remaining == 0 && time.Since(lastArrivedAt) > p.IdleTimeout {
-			p.log.Debugf("idle timeout reached (%s); exiting", p.IdleTimeout)
-
-			p.Natty.DeletePublisher(ctx, p.ID)
-			return nil
-		}
-
-		if remaining == 0 {
-			// Queue is empty, nothing to do
-			return nil
-		}
-
-		p.QueueMutex.Lock()
-		tmpQueue := make([]*message, len(p.Queue))
-		copy(tmpQueue, p.Queue)
-		p.Queue = make([]*message, 0)
-		p.QueueMutex.Unlock()
-
-		lastArrivedAt = time.Now()
-
-		if err := p.writeMessagesBatch(ctx, tmpQueue); err != nil {
-			p.log.Error(err)
-		}
-
-		return nil
-	})
-
-	p.log.Debugf("publisher id '%s' exiting", p.ID)
-}
-
-func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
-	p.log.Debugf("creating a batch for %d messages", len(msgs))
-	println("WRITING messages", len(msgs))
-
-	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
-	if err != nil {
-		return errors.Wrap(err, "unable to create JetStream context")
-	}
-
-	batches := buildBatch(msgs, p.Natty.PublishBatchSize)
-
-	// TODO: how to handle retry?
-	for _, batch := range batches {
-		for _, msg := range batch {
-			if _, err := js.PublishAsync(msg.Subject, msg.Value); err != nil {
-				p.log.Errorf("unable to write message: %s", err)
-			}
-		}
-
-		select {
-		case <-js.PublishAsyncComplete():
-			println("AYNC COMPLETE")
-			p.log.Debugf("Successfully published '%d' messages", len(msgs))
-			return nil
-		case <-time.After(5 * time.Second): // TODO: configurable
-			println("WAIT TIMED OUT")
-			p.log.Error("timed out waiting for message acknowledgement of '%d' messages", len(batch))
-		}
 	}
 
 	return nil

@@ -145,10 +145,10 @@ var _ = Describe("Natty", func() {
 			streamName := strings.ToUpper(GetRandomName("test", 1))
 			consumerName := GetRandomName("test", 1)
 
-			err := n.CreateStream(streamName, []string{streamName + ".*"})
+			err := n.CreateStream(ctx, streamName, []string{streamName + ".*"})
 			Expect(err).ToNot(HaveOccurred())
 
-			err = n.CreateConsumer(streamName, consumerName)
+			err = n.CreateConsumer(ctx, streamName, consumerName)
 			Expect(err).ToNot(HaveOccurred())
 
 			subj := streamName + ".foo"
@@ -216,10 +216,10 @@ var _ = Describe("Natty", func() {
 			streamName := strings.ToUpper(GetRandomName("test", 1))
 			consumerName := GetRandomName("test", 1)
 
-			err := n.CreateStream(streamName, []string{streamName + ".*"})
+			err := n.CreateStream(ctx, streamName, []string{streamName + ".*"})
 			Expect(err).ToNot(HaveOccurred())
 
-			err = n.CreateConsumer(streamName, consumerName)
+			err = n.CreateConsumer(ctx, streamName, consumerName)
 			Expect(err).ToNot(HaveOccurred())
 
 			subj := streamName + ".foo"
@@ -278,73 +278,68 @@ var _ = Describe("Natty", func() {
 		})
 	})
 
-	//Describe("Publish", func() {
-	//	var (
-	//		cfg *Config
-	//		n   *Natty
-	//	)
-	//
-	//	BeforeEach(func() {
-	//		var err error
-	//
-	//		cfg = NewConfig()
-	//
-	//		n, err = New(cfg)
-	//		Expect(err).ToNot(HaveOccurred())
-	//		Expect(n).ToNot(BeNil())
-	//	})
-	//
-	//	It("should publish", func() {
-	//		// Publish stuff
-	//		ctx, cancel := context.WithCancel(context.Background())
-	//		defer cancel()
-	//
-	//		payload := uuid.NewV4().String()
-	//
-	//		cfg := NewConfig()
-	//
-	//		var hit int
-	//
-	//		streamName := strings.ToUpper(GetRandomName("test", 1))
-	//
-	//		// Create a consumer - expect to see a msg
-	//		go func() {
-	//
-	//			//consumerName := GetRandomName("test", 1)
-	//
-	//			//consumerCfg := &ConsumerConfig{
-	//			//	Subject:      streamName,
-	//			//	StreamName:   streamName,
-	//			//	ConsumerName: consumerName,
-	//			//	Looper:       nil,
-	//			//	ErrorCh:      nil,
-	//			//}
-	//
-	//			testStreams = append(testStreams, streamName)
-	//
-	//			natsClient, err := nats.Connect(cfg.NatsURL[0], nats.Secure(tlsConfig))
-	//			Expect(err).ToNot(HaveOccurred())
-	//			Expect(natsClient).ToNot(BeNil())
-	//
-	//			js, err := natsClient.JetStream()
-	//			Expect(err).ToNot(HaveOccurred())
-	//			Expect(js).ToNot(BeNil())
-	//
-	//			_, err = js.Subscribe(streamName, func(msg *nats.Msg) {
-	//				hit += 1
-	//				Expect(string(msg.Data)).To(Equal(payload))
-	//				msg.Ack()
-	//			})
-	//		}()
-	//
-	//		err := n.Publish(ctx, stre, []byte(payload))
-	//		Expect(err).ToNot(HaveOccurred())
-	//
-	//		time.Sleep(1 * time.Second)
-	//
-	//		Expect(hit).To(Equal(1))
-	//	})
-	//})
+	Describe("Publish", func() {
+		var (
+			cfg *Config
+			n   *Natty
+		)
+
+		BeforeEach(func() {
+			var err error
+
+			cfg = NewConfig()
+
+			n, err = New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(n).ToNot(BeNil())
+		})
+
+		It("should publish", func() {
+			const MessagesToPublish = 50
+			defer GinkgoRecover()
+			// Publish stuff
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			payload := uuid.NewV4().String()
+
+			cfg := NewConfig()
+
+			streamName := strings.ToUpper(GetRandomName("test", 1))
+
+			err := n.CreateStream(context.Background(), streamName, []string{streamName + ".*"})
+			Expect(err).ToNot(HaveOccurred())
+
+			var hit int
+
+			// Create a consumer - expect to see a msg
+			go func() {
+				testStreams = append(testStreams, streamName)
+
+				natsClient, err := nats.Connect(cfg.NatsURL[0], nats.Secure(tlsConfig))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(natsClient).ToNot(BeNil())
+
+				js, err := natsClient.JetStream()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(js).ToNot(BeNil())
+
+				_, err = js.Subscribe(streamName+".foo", func(msg *nats.Msg) {
+					hit += 1
+					Expect(string(msg.Data)).To(Equal(payload))
+					msg.Ack()
+				})
+			}()
+
+			for i := 0; i < MessagesToPublish; i++ {
+				n.Publish(ctx, streamName+".foo", []byte(payload))
+			}
+
+			time.Sleep(5 * time.Second)
+
+			Expect(hit).To(Equal(MessagesToPublish))
+		})
+	})
 
 	Describe("CreateStream", func() {
 		It("should create a stream", func() {
@@ -358,7 +353,7 @@ var _ = Describe("Natty", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			name := "ingest-4beb5666-2e30-4b28-a87e-6222731601ec"
-			err = n.CreateStream(name, []string{name})
+			err = n.CreateStream(context.Background(), name, []string{name})
 			Expect(err).ToNot(HaveOccurred())
 
 			CleanupStreams([]string{name})
@@ -377,11 +372,60 @@ var _ = Describe("Natty", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			name := "ingest-4beb5666-2e30-4b28-a87e-6222731601ec"
-			err = n.CreateStream(name, []string{name})
+			err = n.CreateStream(context.Background(), name, []string{name})
 			Expect(err).ToNot(HaveOccurred())
 
-			err = n.DeleteStream(name)
+			err = n.DeleteStream(context.Background(), name)
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Describe("CreateConsumer", func() {
+		It("should create a consumer", func() {
+			cfg := &Config{
+				NatsURL:       []string{NatsURL},
+				UseTLS:        true,
+				TLSSkipVerify: true,
+			}
+
+			n, err := New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			name := "ingest-" + uuid.NewV4().String()
+			err = n.CreateStream(context.Background(), name, []string{name})
+			Expect(err).ToNot(HaveOccurred())
+
+			err = n.CreateConsumer(context.Background(), name, name+"-consumer")
+			Expect(err).ToNot(HaveOccurred())
+
+			CleanupStreams([]string{name})
+		})
+	})
+
+	Describe("DeleteConsumer", func() {
+		It("should delete a consumer", func() {
+			cfg := &Config{
+				NatsURL:       []string{NatsURL},
+				UseTLS:        true,
+				TLSSkipVerify: true,
+			}
+
+			n, err := New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			streamName := "ingest-" + uuid.NewV4().String()
+			consumerName := streamName + "-consumer"
+
+			err = n.CreateStream(context.Background(), streamName, []string{streamName})
+			Expect(err).ToNot(HaveOccurred())
+
+			err = n.CreateConsumer(context.Background(), streamName, consumerName)
+			Expect(err).ToNot(HaveOccurred())
+
+			err = n.DeleteConsumer(context.Background(), consumerName, streamName)
+			Expect(err).ToNot(HaveOccurred())
+
+			CleanupStreams([]string{streamName})
 		})
 	})
 })
