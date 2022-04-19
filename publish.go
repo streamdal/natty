@@ -2,13 +2,13 @@ package natty
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/relistan/go-director"
-	uuid "github.com/satori/go.uuid"
 	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
@@ -47,30 +47,31 @@ func (n *Natty) DeletePublisher(ctx context.Context, topic string) bool {
 	return true
 }
 
-func (n *Natty) getPublisherBySubject(name string) *Publisher {
+func (n *Natty) getPublisherBySubject(subject string) *Publisher {
 	n.publisherMutex.Lock()
 	defer n.publisherMutex.Unlock()
 
-	p, ok := n.publisherMap[name]
+	p, ok := n.publisherMap[subject]
 	if !ok {
-		n.log.Debugf("creating new publisher goroutine for subject '%s'", name)
+		n.log.Debugf("creating new publisher goroutine for subject '%s'", subject)
 
-		p = n.newPublisher(uuid.NewV4().String())
-		n.publisherMap[name] = p
+		p = n.newPublisher(subject)
+		n.publisherMap[subject] = p
 	}
 
 	return p
 }
 
-func (n *Natty) newPublisher(id string) *Publisher {
+func (n *Natty) newPublisher(subject string) *Publisher {
 	ctx, cancel := context.WithCancel(context.Background())
 	publisher := &Publisher{
-		ID:                     id,
+		Subject:                subject,
 		QueueMutex:             &sync.RWMutex{},
 		Queue:                  make([]*message, 0),
 		looper:                 director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
 		PublisherContext:       ctx,
 		PublisherCancel:        cancel,
+		ErrorCh:                n.PublishErrorCh,
 		Natty:                  n,
 		ServiceShutdownContext: n.ServiceShutdownContext,
 		IdleTimeout:            n.WorkerIdleTimeout,
@@ -96,7 +97,8 @@ func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) err
 	for _, batch := range batches {
 		for _, msg := range batch {
 			if _, err := js.PublishAsync(msg.Subject, msg.Value); err != nil {
-				p.log.Errorf("unable to write message: %s", err)
+				err = errors.Wrap(err, "unable to publish message")
+				p.writeError(err)
 			}
 		}
 
@@ -105,11 +107,28 @@ func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) err
 			p.log.Debugf("Successfully published '%d' messages", len(msgs))
 			return nil
 		case <-time.After(p.Natty.PublishTimeout):
-			p.log.Error("timed out waiting for message acknowledgement of '%d' messages", len(batch))
+			msg := fmt.Errorf("timed out waiting for message acknowledgement of '%d' messages for '%s'", len(batch), p.Subject)
+			p.writeError(msg)
 		}
 	}
 
 	return nil
+}
+
+func (p *Publisher) writeError(err error) {
+	p.log.Error(err)
+
+	if p.ErrorCh == nil {
+		return
+	}
+
+	go func() {
+		// Writing in goroutine in case channel is blocked
+		p.ErrorCh <- &PublishError{
+			Subject: p.Subject,
+			Message: err,
+		}
+	}()
 }
 
 func (p *Publisher) batch(_ context.Context, subject string, value []byte) {
@@ -155,7 +174,7 @@ func buildBatch(slice []*message, entriesPerBatch int) [][]*message {
 func (p *Publisher) runBatchPublisher(ctx context.Context) {
 	var quit bool
 
-	p.log.Debugf("publisher id '%s' exiting", p.ID)
+	p.log.Debugf("publisher id '%s' exiting", p.Subject)
 
 	lastArrivedAt := time.Now()
 
@@ -168,7 +187,7 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 		p.QueueMutex.RUnlock()
 
 		if quit && remaining == 0 {
-			p.Natty.DeletePublisher(ctx, p.ID)
+			p.Natty.DeletePublisher(ctx, p.Subject)
 			// empty queue, sleep for a bit and then loop again to check for new messages
 			time.Sleep(time.Millisecond * 100)
 			return nil
@@ -177,11 +196,11 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 		// Should we shutdown?
 		select {
 		case <-ctx.Done(): // DeletePublisher context
-			p.log.Debugf("publisher id '%s' received notice to quit", p.ID)
+			p.log.Debugf("publisher id '%s' received notice to quit", p.Subject)
 			quit = true
 
 		case <-p.ServiceShutdownContext.Done():
-			p.log.Debugf("publisher id '%s' received app shutdown signal, waiting for batch to be empty", p.ID)
+			p.log.Debugf("publisher id '%s' received app shutdown signal, waiting for batch to be empty", p.Subject)
 			quit = true
 		default:
 			// NOOP
@@ -191,7 +210,7 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 		if remaining == 0 && time.Since(lastArrivedAt) > p.IdleTimeout {
 			p.log.Debugf("idle timeout reached (%s); exiting", p.IdleTimeout)
 
-			p.Natty.DeletePublisher(ctx, p.ID)
+			p.Natty.DeletePublisher(ctx, p.Subject)
 			return nil
 		}
 
@@ -215,5 +234,5 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 		return nil
 	})
 
-	p.log.Debugf("publisher id '%s' exiting", p.ID)
+	p.log.Debugf("publisher id '%s' exiting", p.Subject)
 }

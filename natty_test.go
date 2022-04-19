@@ -39,9 +39,7 @@ var _ = AfterSuite(func() {
 })
 
 var _ = Describe("Natty", func() {
-
 	Describe("New", func() {
-
 		It("happy path", func() {
 			n, err := New(NewConfig())
 

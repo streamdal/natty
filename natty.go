@@ -129,9 +129,14 @@ type Config struct {
 	// and is used to trigger shutdown of APIs and then main()
 	MainShutdownFunc context.CancelFunc
 
+	// WorkerIdleTimeout determines how long to keep a publish worker alive if no activity
 	WorkerIdleTimeout time.Duration
 
+	// PublishTimeout is how long to wait for a batch of async publish calls to be ACK'd
 	PublishTimeout time.Duration
+
+	// PublishErrorCh will receive any
+	PublishErrorCh chan *PublishError
 }
 
 // ConsumerConfig is used to pass configuration options to Consume()
@@ -149,17 +154,22 @@ type ConsumerConfig struct {
 	// Looper is optional, if none is provided, one will be created
 	Looper director.Looper
 
-	// ErrorCh is used to retrieve any errors returned in the consumer looper
+	// ErrorCh is used to retrieve any errors returned during asyncronous publishing
+	// If nil, errors will only be logged
 	ErrorCh chan error
 }
 
 type Publisher struct {
-	ID          string
+	Subject     string
 	QueueMutex  *sync.RWMutex
 	Queue       []*message
 	Natty       *Natty
 	IdleTimeout time.Duration
 	looper      director.Looper
+
+	// ErrorCh is optional. It will receive async publish errors if specified
+	// Otherwise errors will only be logged
+	ErrorCh chan *PublishError
 
 	// PublisherContext is used to close a specific publisher
 	PublisherContext context.Context
@@ -177,6 +187,12 @@ type Publisher struct {
 type message struct {
 	Subject string
 	Value   []byte
+}
+
+// PublishError is a wrapper struct used to return errors to code that occur during async batch publishes
+type PublishError struct {
+	Subject string
+	Message error
 }
 
 type Natty struct {
@@ -444,14 +460,6 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 
 	return nil
 }
-
-//func (n *Natty) Publish(ctx context.Context, subj string, msg []byte) error {
-//	if _, err := n.js.Publish(subj, msg, nats.Context(ctx)); err != nil {
-//		return errors.Wrap(err, "unable to publish message")
-//	}
-//
-//	return nil
-//}
 
 func (n *Natty) report(errorCh chan error, err error) {
 	if errorCh != nil {
