@@ -9,4 +9,5 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/relistan/go-director v0.0.0-20200406104025-dbbf5d95248d
 	github.com/satori/go.uuid v1.2.0
+	gopkg.in/DataDog/dd-trace-go.v1 v1.37.1
 )
