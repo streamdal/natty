@@ -159,7 +159,7 @@ type ConsumerConfig struct {
 	// Looper is optional, if none is provided, one will be created
 	Looper director.Looper
 
-	// ErrorCh is used to retrieve any errors returned during asyncronous publishing
+	// ErrorCh is used to retrieve any errors returned during asynchronous publishing
 	// If nil, errors will only be logged
 	ErrorCh chan error
 }
