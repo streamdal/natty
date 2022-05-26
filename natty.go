@@ -479,7 +479,11 @@ func (n *Natty) report(errorCh chan error, err error) {
 	if errorCh != nil {
 		// Write the err in a goroutine to avoid block in case chan is full
 		go func() {
-			errorCh <- err
+			select {
+			case errorCh <- err:
+			default:
+				n.log.Warnf("consumer error channel is full; discarding error")
+			}
 		}()
 	}
 

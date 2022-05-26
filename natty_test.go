@@ -29,14 +29,14 @@ var (
 	}
 )
 
-//var _ = AfterSuite(func() {
-//	// CleanupStreams streams
-//	err := CleanupStreams(testStreams)
-//	Expect(err).ToNot(HaveOccurred())
-//
-//	err = CleanupBuckets(testBuckets)
-//	Expect(err).ToNot(HaveOccurred())
-//})
+var _ = AfterSuite(func() {
+	// CleanupStreams streams
+	err := CleanupStreams(testStreams)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = CleanupBuckets(testBuckets)
+	Expect(err).ToNot(HaveOccurred())
+})
 
 var _ = Describe("Natty", func() {
 	Describe("New", func() {

@@ -124,9 +124,13 @@ func (p *Publisher) writeError(err error) {
 
 	go func() {
 		// Writing in goroutine in case channel is blocked
-		p.ErrorCh <- &PublishError{
+		select {
+		case p.ErrorCh <- &PublishError{
 			Subject: p.Subject,
 			Message: err,
+		}:
+		default:
+			p.log.Warnf("publish error channel is full; discarding error")
 		}
 	}()
 }
