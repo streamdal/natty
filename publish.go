@@ -86,12 +86,14 @@ func (n *Natty) newPublisher(subject string) *Publisher {
 func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
 	p.log.Debugf("creating a batch for %d messages", len(msgs))
 
-	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
+	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize), nats.Context(ctx))
 	if err != nil {
 		return errors.Wrap(err, "unable to create JetStream context")
 	}
 
 	batches := buildBatch(msgs, p.Natty.PublishBatchSize)
+
+	fmt.Printf("total number of msgs: %d num batches: %d\n", len(msgs), len(batches))
 
 	// TODO: how to handle retry?
 	for _, batch := range batches {
