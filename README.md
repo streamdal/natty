@@ -1,5 +1,6 @@
 natty
 =====
+[![Go Reference](https://pkg.go.dev/badge/github.com/batchcorp/natty.svg)](https://pkg.go.dev/github.com/batchcorp/natty)
 [![Go Report Card](https://goreportcard.com/badge/github.com/batchcorp/natty)](https://goreportcard.com/report/github.com/batchcorp/natty)
 
 
