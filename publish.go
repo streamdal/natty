@@ -93,8 +93,6 @@ func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) err
 
 	batches := buildBatch(msgs, p.Natty.PublishBatchSize)
 
-	fmt.Printf("total number of msgs: %d num batches: %d\n", len(msgs), len(batches))
-
 	// TODO: how to handle retry?
 	for _, batch := range batches {
 		for _, msg := range batch {

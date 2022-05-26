@@ -4,7 +4,6 @@ package natty
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -203,7 +202,7 @@ var _ = Describe("Natty", func() {
 			Expect(len(consumed)).To(Equal(5))
 		})
 
-		FIt("uses the filter subject", func() {
+		It("uses the filter subject", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -219,32 +218,27 @@ var _ = Describe("Natty", func() {
 			err = n.CreateConsumer(ctx, streamName, consumerName, goodFilter)
 			Expect(err).ToNot(HaveOccurred())
 
-			// Launch an error channel watcher
+			publishNumMessages := 100
 
 			// Publish some messages to streamName.foo
-			for i := 0; i < 100; i++ {
-				fmt.Printf("iteration %d %s\n", i, goodFilter)
+			for i := 0; i < publishNumMessages; i++ {
 				n.Publish(ctx, goodFilter, []byte("good"))
-				i++
 			}
 
 			// Publish some messages to streamName.bar
-			for i := 0; i < 100; i++ {
-				fmt.Printf("iteration %d %s\n", i, badFilter)
+			for i := 0; i < publishNumMessages; i++ {
 				n.Publish(ctx, badFilter, []byte("bad"))
-				i++
 			}
 
+			// Publish is async - give it a second to actually get written
 			time.Sleep(time.Second)
 
 			doneCh := make(chan struct{}, 0)
 			consumed := make([]*nats.Msg, 0)
 
 			handler := func(ctx context.Context, msg *nats.Msg) error {
-				fmt.Printf("consumed: %d subject %s\n", len(consumed), msg.Subject)
-
 				consumed = append(consumed, msg)
-				msg.Ack()
+				Expect(msg.Ack()).ToNot(HaveOccurred())
 
 				if len(consumed) == 100 {
 					doneCh <- struct{}{}
@@ -270,6 +264,12 @@ var _ = Describe("Natty", func() {
 				Fail("consumer timed out waiting for message(s)")
 			case <-doneCh:
 				break
+			}
+
+			Expect(len(consumed)).To(Equal(publishNumMessages))
+
+			for _, m := range consumed {
+				Expect(m.Subject).To(Equal(goodFilter))
 			}
 		})
 
