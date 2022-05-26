@@ -1,5 +1,8 @@
 natty
 =====
+[![Go Report Card](https://goreportcard.com/badge/github.com/batchcorp/natty)](https://goreportcard.com/report/github.com/batchcorp/natty)
+
+
 An opinionated, [NATS](https://nats.io) Jetstream client wrapper lib for Go.
 
 Used by [plumber](https://github.com/batchcorp/plumber) and other Batch applications.
