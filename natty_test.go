@@ -394,6 +394,7 @@ var _ = Describe("Natty", func() {
 					Expect(string(msg.Data)).To(Equal(payload))
 					msg.Ack()
 				})
+				Expect(err).ToNot(HaveOccurred())
 			}()
 
 			for i := 0; i < MessagesToPublish; i++ {
