@@ -203,7 +203,74 @@ var _ = Describe("Natty", func() {
 		})
 
 		It("uses the filter subject", func() {
-			// TODO: Do this :)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			streamName := strings.ToUpper(GetRandomName("test", 1))
+			consumerName := GetRandomName("test", 1)
+
+			err := n.CreateStream(ctx, streamName, []string{streamName + ".*"})
+			Expect(err).ToNot(HaveOccurred())
+
+			goodFilter := streamName + ".foo"
+			badFilter := streamName + ".bar"
+
+			err = n.CreateConsumer(ctx, streamName, consumerName, goodFilter)
+			Expect(err).ToNot(HaveOccurred())
+
+			publishNumMessages := 100
+
+			// Publish some messages to streamName.foo
+			for i := 0; i < publishNumMessages; i++ {
+				n.Publish(ctx, goodFilter, []byte("good"))
+			}
+
+			// Publish some messages to streamName.bar
+			for i := 0; i < publishNumMessages; i++ {
+				n.Publish(ctx, badFilter, []byte("bad"))
+			}
+
+			// Publish is async - give it a second to actually get written
+			time.Sleep(time.Second)
+
+			doneCh := make(chan struct{}, 0)
+			consumed := make([]*nats.Msg, 0)
+
+			handler := func(ctx context.Context, msg *nats.Msg) error {
+				consumed = append(consumed, msg)
+				Expect(msg.Ack()).ToNot(HaveOccurred())
+
+				if len(consumed) == 100 {
+					doneCh <- struct{}{}
+				}
+
+				return nil
+			}
+
+			// Consumer should only receive for streamName.foo
+			go func() {
+				err = n.Consume(ctx, &ConsumerConfig{
+					StreamName:   streamName,
+					Subject:      goodFilter,
+					ConsumerName: consumerName,
+				}, handler)
+
+				Expect(err).ToNot(HaveOccurred())
+			}()
+
+			// Should receive data within 5 seconds
+			select {
+			case <-time.After(5 * time.Second):
+				Fail("consumer timed out waiting for message(s)")
+			case <-doneCh:
+				break
+			}
+
+			Expect(len(consumed)).To(Equal(publishNumMessages))
+
+			for _, m := range consumed {
+				Expect(m.Subject).To(Equal(goodFilter))
+			}
 		})
 
 		It("error watch channel is used", func() {

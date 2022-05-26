@@ -35,11 +35,13 @@ type Mode int
 
 type INatty interface {
 	// Consume subscribes to given subject and executes callback every time a
-	// message is received. This is a blocking call; cancellation should be
-	// performed via the context.
+	// message is received. Consumed messages must be explicitly ACK'd or NAK'd.
+	//
+	// This is a blocking call; cancellation should be performed via the context.
 	Consume(ctx context.Context, cfg *ConsumerConfig, cb func(ctx context.Context, msg *nats.Msg) error) error
 
-	// Publish publishes a single message with the given subject
+	// Publish publishes a single message with the given subject; this method
+	// will perform automatic batching as configured during `natty.New(..)`
 	Publish(ctx context.Context, subject string, data []byte)
 
 	// DeletePublisher shuts down a publisher and deletes it from the internal publisherMap
@@ -52,7 +54,7 @@ type INatty interface {
 	DeleteStream(ctx context.Context, name string) error
 
 	// CreateConsumer creates a new consumer if it does not exist
-	CreateConsumer(ctx context.Context, streamName, consumerName string) error
+	CreateConsumer(ctx context.Context, streamName, consumerName string, filterSubject ...string) error
 
 	// DeleteConsumer deletes an existing consumer
 	DeleteConsumer(ctx context.Context, consumerName, streamName string) error
@@ -76,6 +78,9 @@ type INatty interface {
 	// Delete will delete a key from a given bucket. Will no-op if the bucket
 	// or key does not exist.
 	Delete(ctx context.Context, bucket string, key string) error
+
+	// DeleteBucket will delete the specified bucket
+	DeleteBucket(ctx context.Context, bucket string) error
 }
 
 type Config struct {
@@ -154,7 +159,7 @@ type ConsumerConfig struct {
 	// Looper is optional, if none is provided, one will be created
 	Looper director.Looper
 
-	// ErrorCh is used to retrieve any errors returned during asyncronous publishing
+	// ErrorCh is used to retrieve any errors returned during asynchronous publishing
 	// If nil, errors will only be logged
 	ErrorCh chan error
 }
@@ -366,13 +371,20 @@ func GenerateTLSConfig(caCertFile, clientKeyFile, clientCertFile string, tlsSkip
 	}, nil
 }
 
-func (n *Natty) CreateConsumer(ctx context.Context, streamName, consumerName string) error {
+func (n *Natty) CreateConsumer(ctx context.Context, streamName, consumerName string, filterSubject ...string) error {
 	span, _ := tracer.StartSpanFromContext(ctx, "natty.CreateConsumer")
 	defer span.Finish()
 
+	var filter string
+
+	if len(filterSubject) > 0 {
+		filter = filterSubject[0]
+	}
+
 	if _, err := n.js.AddConsumer(streamName, &nats.ConsumerConfig{
-		Durable:   consumerName,
-		AckPolicy: nats.AckExplicitPolicy,
+		Durable:       consumerName,
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: filter,
 	}); err != nil {
 		err = errors.Wrap(err, "unable to create consumer")
 		span.SetTag("error", err)
@@ -446,10 +458,10 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 			return nil
 		}
 
-		for _, v := range msgs {
-			if err := f(ctx, v); err != nil {
+		for _, m := range msgs {
+			if err := f(ctx, m); err != nil {
 				n.report(cfg.ErrorCh, fmt.Errorf("callback func failed during message processing (stream: '%s', subj: '%s', msg: '%s'): %s",
-					cfg.StreamName, cfg.Subject, v.Data, err))
+					cfg.StreamName, cfg.Subject, m.Data, err))
 			}
 		}
 
@@ -462,10 +474,16 @@ func (n *Natty) Consume(ctx context.Context, cfg *ConsumerConfig, f func(ctx con
 }
 
 func (n *Natty) report(errorCh chan error, err error) {
+	n.log.Error(err)
+
 	if errorCh != nil {
 		// Write the err in a goroutine to avoid block in case chan is full
 		go func() {
-			errorCh <- err
+			select {
+			case errorCh <- err:
+			default:
+				n.log.Warnf("consumer error channel is full; discarding error")
+			}
 		}()
 	}
 
@@ -527,11 +545,6 @@ func validateConsumerConfig(cfg *ConsumerConfig) error {
 
 	if cfg.Subject == "" {
 		return ErrEmptySubject
-	}
-
-	// Apply optional defaults if needed
-	if cfg.ErrorCh == nil {
-		cfg.ErrorCh = make(chan error, 1)
 	}
 
 	if cfg.Looper == nil {

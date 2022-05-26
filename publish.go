@@ -86,7 +86,7 @@ func (n *Natty) newPublisher(subject string) *Publisher {
 func (p *Publisher) writeMessagesBatch(ctx context.Context, msgs []*message) error {
 	p.log.Debugf("creating a batch for %d messages", len(msgs))
 
-	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize))
+	js, err := p.Natty.nc.JetStream(nats.PublishAsyncMaxPending(p.Natty.PublishBatchSize), nats.Context(ctx))
 	if err != nil {
 		return errors.Wrap(err, "unable to create JetStream context")
 	}
@@ -124,9 +124,13 @@ func (p *Publisher) writeError(err error) {
 
 	go func() {
 		// Writing in goroutine in case channel is blocked
-		p.ErrorCh <- &PublishError{
+		select {
+		case p.ErrorCh <- &PublishError{
 			Subject: p.Subject,
 			Message: err,
+		}:
+		default:
+			p.log.Warnf("publish error channel is full; discarding error")
 		}
 	}()
 }
