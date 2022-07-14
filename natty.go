@@ -74,7 +74,7 @@ type INatty interface {
 	// Create will attempt to create a key in KV. It will return an error if
 	// the key already exists. Will auto-create the bucket if it does not
 	// already exist.
-	Create(ctx context.Context, bucket string, key string) error
+	Create(ctx context.Context, bucket string, key string, data []byte, keyTTL ...time.Duration) error
 
 	// Put will put a new value for a given bucket and key. Will auto-create
 	// the bucket if it does not already exist.
