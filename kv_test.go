@@ -59,6 +59,101 @@ var _ = Describe("KV", func() {
 		})
 	})
 
+	Describe("Create", func() {
+		It("should auto-create bucket + create kv entry", func() {
+			bucket, key, value := NewKVSet()
+
+			putErr := n.Create(nil, bucket, key, value)
+			Expect(putErr).ToNot(HaveOccurred())
+
+			// Bucket should've been created
+			kv, err := n.js.KeyValue(bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).NotTo(BeNil())
+
+			// K/V should've been created
+			kve, err := kv.Get(key)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kve).NotTo(BeNil())
+
+			// Values should match
+			Expect(kve.Value()).To(Equal(value))
+		})
+
+		It("should work if bucket already exists", func() {
+			bucket, key, value := NewKVSet()
+			ttl := 10 * time.Second
+
+			// Pre-create bucket
+			_, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket: bucket,
+				TTL:    ttl,
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+
+			// Verify that bucket exists
+			kv, err := n.js.KeyValue(bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).NotTo(BeNil())
+
+			// Create entry
+			err = n.Create(nil, bucket, key, value)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Did the entry get created?
+			kve, err := kv.Get(key)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kve).NotTo(BeNil())
+
+			// Values should match
+			Expect(kve.Value()).To(Equal(value))
+		})
+
+		It("should error if key already exists in bucket", func() {
+			bucket, key, value := NewKVSet()
+			ttl := 10 * time.Second
+
+			// Pre-create bucket
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket: bucket,
+				TTL:    ttl,
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+
+			// Pre-add key
+			_, err = kv.Create(key, value)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Attempt to create for same key should error
+			err = n.Create(nil, bucket, key, value)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("wrong last sequence"))
+		})
+
+		It("should use TTL", func() {
+			bucket, key, value := NewKVSet()
+			ttl := 10 * time.Second
+
+			_, err := n.js.KeyValue(bucket)
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(Equal(nats.ErrBucketNotFound))
+
+			err = n.Create(nil, bucket, key, value, ttl)
+			Expect(err).ToNot(HaveOccurred())
+
+			kv, err := n.js.KeyValue(bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			status, err := kv.Status()
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(status.TTL()).To(Equal(ttl))
+		})
+	})
+
 	Describe("Put", func() {
 		It("should set the value for a key (and auto-create the bucket)", func() {
 			bucket, key, value := NewKVSet()
