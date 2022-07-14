@@ -38,7 +38,8 @@ func (n *Natty) Get(ctx context.Context, bucket string, key string) ([]byte, err
 }
 
 // Put puts a key/val into a bucket and will create bucket if it doesn't already
-// exit. TTL is optional; if provided, only the first value will be used.
+// exit. TTL is optional - it will only be used if the bucket does not exist &
+// only the first TTL will be used.
 func (n *Natty) Put(ctx context.Context, bucket string, key string, data []byte, keyTTL ...time.Duration) error {
 	// NOTE: Context usage for K/V operations is not available in NATS (yet)
 	var ttl time.Duration
@@ -53,6 +54,29 @@ func (n *Natty) Put(ctx context.Context, bucket string, key string, data []byte,
 	}
 
 	if _, err := kv.Put(key, data); err != nil {
+		return errors.Wrap(err, "unable to put key")
+	}
+
+	return nil
+}
+
+// Create will add the key/value pair iff it does not exist; it will create
+// the bucket if it does not already exist. TTL is optional - it will only be
+// used if the bucket does not exist & only the first TTL will be used.
+func (n *Natty) Create(ctx context.Context, bucket string, key string, data []byte, keyTTL ...time.Duration) error {
+	// NOTE: Context usage for K/V operations is not available in NATS (yet)
+	var ttl time.Duration
+
+	if len(keyTTL) > 0 {
+		ttl = keyTTL[0]
+	}
+
+	kv, err := n.getBucket(ctx, bucket, true, ttl)
+	if err != nil {
+		return errors.Wrap(err, "unable to fetch bucket")
+	}
+
+	if _, err := kv.Create(key, data); err != nil {
 		return errors.Wrap(err, "unable to put key")
 	}
 
