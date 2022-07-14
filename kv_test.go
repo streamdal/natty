@@ -220,7 +220,7 @@ var _ = Describe("KV", func() {
 
 			// Check via js context that it's gone
 			_, getErr := kv.Get(key)
-			Expect(getErr).To(Equal(nats.ErrKeyDeleted))
+			Expect(getErr).To(Equal(nats.ErrKeyNotFound))
 		})
 	})
 })
