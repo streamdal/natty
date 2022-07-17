@@ -226,7 +226,7 @@ var _ = Describe("KV", func() {
 		})
 	})
 
-	FDescribe("Keys", func() {
+	Describe("Keys", func() {
 		It("should return all keys in bucket", func() {
 			// Create bucket, add a bunch of keys into it
 			bucket, _, _ := NewKVSet()
