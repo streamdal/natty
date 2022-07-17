@@ -86,6 +86,9 @@ type INatty interface {
 
 	// DeleteBucket will delete the specified bucket
 	DeleteBucket(ctx context.Context, bucket string) error
+
+	// Keys will return all of the keys in a bucket (empty slice if none found)
+	Keys(ctx context.Context, bucket string) ([]string, error)
 }
 
 type Config struct {
