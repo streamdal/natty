@@ -83,6 +83,24 @@ func (n *Natty) Create(ctx context.Context, bucket string, key string, data []by
 	return nil
 }
 
+func (n *Natty) Keys(ctx context.Context, bucket string) ([]string, error) {
+	kv, err := n.getBucket(ctx, bucket, false, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	keys, err := kv.Keys(nats.Context(ctx))
+	if err != nil {
+		if err == nats.ErrNoKeysFound {
+			return make([]string, 0), nil
+		}
+
+		return nil, err
+	}
+
+	return keys, nil
+}
+
 func (n *Natty) Delete(ctx context.Context, bucket string, key string) error {
 	// NOTE: Context usage for K/V operations is not available in NATS (yet)
 	kv, err := n.getBucket(ctx, bucket, false, 0)

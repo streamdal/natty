@@ -2,6 +2,8 @@
 package natty
 
 import (
+	"context"
+	"math/rand"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -221,6 +223,56 @@ var _ = Describe("KV", func() {
 			// Check via js context that it's gone
 			_, getErr := kv.Get(key)
 			Expect(getErr).To(Equal(nats.ErrKeyNotFound))
+		})
+	})
+
+	Describe("Keys", func() {
+		It("should return all keys in bucket", func() {
+			// Create bucket, add a bunch of keys into it
+			bucket, _, _ := NewKVSet()
+
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:      bucket,
+				Description: "tmp bucket for testing Keys()",
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			numKeys := rand.Intn(20) + 1 // + 1 to avoid 0
+
+			for i := 0; i < numKeys; i++ {
+				_, putErr := kv.Put(uuid.NewV4().String(), []byte("test"))
+				Expect(putErr).ToNot(HaveOccurred())
+			}
+
+			keys, err := n.Keys(context.Background(), bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(keys)).To(Equal(numKeys))
+		})
+
+		It("should return emtpy slice if no keys in bucket", func() {
+			// Create bucket, add a bunch of keys into it
+			bucket, _, _ := NewKVSet()
+
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:      bucket,
+				Description: "tmp bucket for testing Keys()",
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			keys, err := n.Keys(context.Background(), bucket)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(keys)).To(Equal(0))
+		})
+
+		It("should error if bucket does not exist", func() {
+			keys, err := n.Keys(context.Background(), uuid.NewV4().String())
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(Equal(nats.ErrBucketNotFound))
+			Expect(keys).To(BeNil())
 		})
 	})
 })
