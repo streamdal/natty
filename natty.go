@@ -84,11 +84,22 @@ type INatty interface {
 	// or key does not exist.
 	Delete(ctx context.Context, bucket string, key string) error
 
+	// CreateBucket will attempt to create a new bucket. Will return an error if
+	// bucket already exists.
+	CreateBucket(ctx context.Context, bucket string, ttl time.Duration, description ...string) error
+
 	// DeleteBucket will delete the specified bucket
 	DeleteBucket(ctx context.Context, bucket string) error
 
 	// Keys will return all of the keys in a bucket (empty slice if none found)
 	Keys(ctx context.Context, bucket string) ([]string, error)
+
+	// AsLeader enables simple leader election by using NATS k/v functionality.
+	//
+	// AsLeader will execute opts.Func if and only if the node executing AsLeader
+	// acquires leader role. It will continue executing opts.Func until it loses
+	// leadership and another node becomes leader.
+	AsLeader(ctx context.Context, opts *AsLeaderConfig, f func() error) error
 }
 
 type Config struct {

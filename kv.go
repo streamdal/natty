@@ -11,7 +11,8 @@ import (
 
 type KeyValueMap struct {
 	rwMutex *sync.RWMutex
-	kvMap   map[string]nats.KeyValue
+	// Key = bucket name, value = KeyValue
+	kvMap map[string]nats.KeyValue
 }
 
 func (n *Natty) Get(ctx context.Context, bucket string, key string) ([]byte, error) {
@@ -126,6 +127,28 @@ func (n *Natty) DeleteBucket(_ context.Context, bucket string) error {
 
 		return errors.Wrap(err, "unable to delete bucket")
 	}
+
+	return nil
+}
+
+// CreateBucket creates a bucket; returns an error if it already exists.
+// Context usage not supported by NATS kv (yet).
+func (n *Natty) CreateBucket(_ context.Context, name string, ttl time.Duration, description ...string) error {
+	cfg := &nats.KeyValueConfig{
+		Bucket: name,
+		TTL:    ttl,
+	}
+
+	if len(description) > 0 {
+		cfg.Description = description[0]
+	}
+
+	kv, err := n.js.CreateKeyValue(cfg)
+	if err != nil {
+		return err
+	}
+
+	n.kvMap.Put(name, kv)
 
 	return nil
 }
