@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	DefaultBucketTTl       = time.Second * 10
-	ElectionLooperInterval = time.Second * 3
+	AsLeaderBucketTTL                     = time.Second * 10
+	DefaultAsLeaderElectionLooperInterval = time.Second
 )
 
 var (
@@ -25,24 +25,33 @@ type AsLeaderConfig struct {
 	// Bucket specifies what K/V bucket will be used for leader election (required)
 	Bucket string
 
+	// Key specifies the keyname that the leader election will occur on (required)
+	Key string
+
 	// NodeName is the name used for this node (should be unique in cluster) (optional)
 	NodeName string
-
-	// BucketTTL specifies the TTL of values in the bucket (optional; default = 10s)
-	BucketTTL time.Duration
-
-	// ElectionLooper specifies the loop construct that will be used to perform leader election attempts (optional)
-	ElectionLooper director.Looper
 
 	// Description will set the bucket description (optional)
 	Description string
 
-	// Internal fields
-	haveLeader bool
+	// ElectionLooper allows you to override the used election looper (optional)
+	ElectionLooper director.Looper
 }
 
-func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() error) error {
-	if err := validateAsLeaderConfig(cfg); err != nil {
+func (n *Natty) HaveLeader(cfg *AsLeaderConfig) bool {
+	n.leaderMutex.RLock()
+	defer n.leaderMutex.RUnlock()
+
+	nodeName, ok := n.leaderMap[asLeaderKey(cfg.Bucket, cfg.Key)]
+	if !ok {
+		return false
+	}
+
+	return nodeName == cfg.NodeName
+}
+
+func (n *Natty) AsLeader(ctx context.Context, cfg AsLeaderConfig, f func() error) error {
+	if err := validateAsLeaderConfig(&cfg); err != nil {
 		return errors.Wrap(err, "unable to validate AsLeaderConfig")
 	}
 
@@ -51,7 +60,7 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 	}
 
 	// Attempt to create bucket; if bucket exists, verify that TTL matches
-	if err := n.CreateBucket(ctx, cfg.Bucket, cfg.BucketTTL, cfg.Description); err != nil {
+	if err := n.CreateBucket(ctx, cfg.Bucket, AsLeaderBucketTTL, cfg.Description); err != nil {
 		if strings.Contains(err.Error(), "stream name already in use") {
 			n.log.Debug("bucket exists, checking if ttl matches")
 
@@ -65,9 +74,9 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 				return errors.Wrap(err, "unable to fetch existing bucket status")
 			}
 
-			n.log.Debugf("ttl on bucket: %v desired ttl: %v", s.TTL(), cfg.BucketTTL)
+			n.log.Debugf("ttl on bucket: %v desired ttl: %v", s.TTL(), AsLeaderBucketTTL)
 
-			if s.TTL().Seconds() != cfg.BucketTTL.Seconds() {
+			if s.TTL().Seconds() != AsLeaderBucketTTL.Seconds() {
 				n.log.Error("bucket ttls do not match")
 				return ErrBucketTTLMismatch
 			}
@@ -82,7 +91,7 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 
 	// Launch leader election in goroutine (leader election goroutine should quit when AsLeader is cancelled or exits)
 	go func() {
-		err := n.runLeaderElection(ctx, cfg)
+		err := n.runLeaderElection(ctx, &cfg)
 		if err != nil {
 			n.log.Errorf("%s: unable to run leader election: %v", cfg.NodeName, err)
 			errCh <- err
@@ -107,7 +116,7 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 	n.log.Debugf("%s: leader election goroutine started; running main loop", cfg.NodeName)
 
 	cfg.Looper.Loop(func() error {
-		if !cfg.haveLeader {
+		if !n.HaveLeader(&cfg) {
 			n.log.Debugf("%s: AsLeader: not leader", cfg.NodeName)
 			return nil
 		}
@@ -149,34 +158,34 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 		}
 
 		// Have leader - attempt to update key to increase TTL
-		if cfg.haveLeader {
-			if err := n.Put(ctx, cfg.Bucket, "leader", []byte(cfg.NodeName)); err != nil {
-				n.log.Errorf("%s: unable to update leader key: %v", cfg.NodeName, err)
-				cfg.haveLeader = false
+		if n.HaveLeader(cfg) {
+			if err := n.Put(ctx, cfg.Bucket, cfg.Key, []byte(cfg.NodeName)); err != nil {
+				n.log.Errorf("%s: unable to update leader key '%s:%s': %v", cfg.NodeName, cfg.Bucket, cfg.Key, err)
+				n.loseLeader(cfg)
 
 				return nil
 			}
 
-			n.log.Debugf("%s: updated leader key", cfg.NodeName)
+			n.log.Debugf("%s: updated leader key '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 
 			return nil
 		}
 
-		if err := n.Create(ctx, cfg.Bucket, "leader", []byte(cfg.NodeName)); err != nil {
+		if err := n.Create(ctx, cfg.Bucket, cfg.Key, []byte(cfg.NodeName)); err != nil {
 			if strings.Contains(err.Error(), "wrong last sequence") {
 				n.log.Debugf("%s: leader key already exists, ignoring", cfg.NodeName)
 				return nil
 			}
 
-			n.log.Errorf("%s: unable to create leader key: %v", cfg.NodeName, err)
+			n.log.Errorf("%s: unable to create leader key '%s:%s': %v", cfg.NodeName, cfg.Bucket, cfg.Key, err)
 
 			return nil
 		}
 
-		n.log.Debugf("%s: leader key created", cfg.NodeName)
+		n.log.Debugf("%s: leader key created '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 
 		// Have leader
-		cfg.haveLeader = true
+		n.becomeLeader(cfg)
 
 		return nil
 	})
@@ -184,6 +193,20 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 	n.log.Debugf("%s: leader election goroutine exiting", cfg.NodeName)
 
 	return nil
+}
+
+func (n *Natty) becomeLeader(cfg *AsLeaderConfig) {
+	n.leaderMutex.Lock()
+	defer n.leaderMutex.Unlock()
+
+	n.leaderMap[asLeaderKey(cfg.Bucket, cfg.Key)] = cfg.NodeName
+}
+
+func (n *Natty) loseLeader(cfg *AsLeaderConfig) {
+	n.leaderMutex.Lock()
+	defer n.leaderMutex.Unlock()
+
+	delete(n.leaderMap, asLeaderKey(cfg.Bucket, cfg.Key))
 }
 
 func validateAsLeaderConfig(cfg *AsLeaderConfig) error {
@@ -199,13 +222,17 @@ func validateAsLeaderConfig(cfg *AsLeaderConfig) error {
 		return errors.New("Bucket is required")
 	}
 
-	if cfg.BucketTTL == 0 {
-		cfg.BucketTTL = DefaultBucketTTl
+	if cfg.Key == "" {
+		return errors.New("Key is required")
 	}
 
 	if cfg.ElectionLooper == nil {
-		cfg.ElectionLooper = director.NewTimedLooper(director.FOREVER, ElectionLooperInterval, make(chan error, 1))
+		cfg.ElectionLooper = director.NewTimedLooper(director.FOREVER, DefaultAsLeaderElectionLooperInterval, make(chan error, 1))
 	}
 
 	return nil
+}
+
+func asLeaderKey(bucket, key string) string {
+	return bucket + "-" + key
 }

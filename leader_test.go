@@ -46,14 +46,16 @@ var _ = Describe("KV", func() {
 
 	Describe("AsLeader", func() {
 		It("should error with bad config", func() {
-			cfg := NewAsLeaderConfig("batman", uuid.NewV4().String())
+			cfg := NewAsLeaderConfig("batman", uuid.NewV4().String(), uuid.NewV4().String())
 
-			err := n.AsLeader(context.Background(), nil, nil)
-			Expect(err.Error()).To(ContainSubstring("AsLeaderConfig is required"))
-
-			err = n.AsLeader(context.Background(), cfg, nil)
+			err := n.AsLeader(context.Background(), cfg, nil)
 			Expect(err.Error()).To(ContainSubstring("func is required"))
 
+			// Quick, non-extensive check
+			cfg.Looper = nil
+
+			err = n.AsLeader(context.Background(), cfg, nil)
+			Expect(err.Error()).To(ContainSubstring("Looper is required"))
 		})
 
 		It("should exec func when leader", func() {
@@ -62,9 +64,10 @@ var _ = Describe("KV", func() {
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
 			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
 
 			for i := 0; i < 3; i++ {
-				cfg := NewAsLeaderConfig(fmt.Sprintf("node-%d", i), bucketName)
+				cfg := NewAsLeaderConfig(fmt.Sprintf("node-%d", i), bucketName, keyName)
 
 				go func() {
 					defer GinkgoRecover()
@@ -114,8 +117,9 @@ var _ = Describe("KV", func() {
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
 			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
 
-			cfg := NewAsLeaderConfig("node-1", bucketName)
+			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
 
 			go func() {
 				defer GinkgoRecover()
@@ -141,7 +145,7 @@ var _ = Describe("KV", func() {
 			// Start another AsLeader
 			var iran2 bool
 
-			cfg2 := NewAsLeaderConfig("node-2", bucketName)
+			cfg2 := NewAsLeaderConfig("node-2", bucketName, keyName)
 			errChan2 := make(chan error, 10)
 
 			go func() {
@@ -170,6 +174,7 @@ var _ = Describe("KV", func() {
 		It("should auto-create bucket", func() {
 			// Verify bucket doesn't exist
 			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
 
 			kv, err := n.js.KeyValue(bucketName)
 			Expect(err).To(Equal(nats.ErrBucketNotFound))
@@ -179,7 +184,7 @@ var _ = Describe("KV", func() {
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
 
-			cfg := NewAsLeaderConfig("node-1", bucketName)
+			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
 
 			go func() {
 				defer GinkgoRecover()
@@ -206,7 +211,8 @@ var _ = Describe("KV", func() {
 
 		It("should work with existing bucket and same TTL", func() {
 			bucketName := uuid.NewV4().String()
-			bucketTTL := 321 * time.Second
+			keyName := uuid.NewV4().String()
+			bucketTTL := AsLeaderBucketTTL
 
 			// Create bucket manually with TTL
 			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
@@ -222,8 +228,7 @@ var _ = Describe("KV", func() {
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
 
-			cfg := NewAsLeaderConfig("node-1", bucketName)
-			cfg.BucketTTL = bucketTTL
+			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
 
 			go func() {
 				defer GinkgoRecover()
@@ -246,6 +251,7 @@ var _ = Describe("KV", func() {
 
 		It("should error when pre-existing bucket has different TTL", func() {
 			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
 			bucketTTL := 321 * time.Second
 
 			// Create bucket manually with TTL
@@ -263,8 +269,7 @@ var _ = Describe("KV", func() {
 			cancelCtx, cancel := context.WithCancel(context.Background())
 			errChan := make(chan error, 10)
 
-			cfg := NewAsLeaderConfig("node-1", bucketName)
-			cfg.BucketTTL = time.Second * 123456789
+			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
 
 			go func() {
 				errorHasOccurred = n.AsLeader(cancelCtx, cfg, func() error {
@@ -282,14 +287,74 @@ var _ = Describe("KV", func() {
 			cancel()
 
 		})
+
+		It("HaveLeader should work", func() {
+			// Launch 3 AsLeaders, figure out who's the leader, run HaveLeader
+			// with each cfg - two should not have leader, one should have leader
+			executedBy := make([]string, 0)
+
+			errChan := make(chan error, 10)
+			cancelCtx, cancel := context.WithCancel(context.Background())
+			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
+			cfgs := make(map[string]AsLeaderConfig)
+
+			for i := 0; i < 3; i++ {
+				nodeName := fmt.Sprintf("node-%d", i)
+
+				cfg := NewAsLeaderConfig(nodeName, bucketName, keyName)
+
+				cfgs[nodeName] = cfg
+
+				go func() {
+					defer GinkgoRecover()
+
+					err := n.AsLeader(cancelCtx, cfg, func() error {
+						executedBy = append(executedBy, cfg.NodeName)
+						return nil
+					})
+
+					if err != nil {
+						errChan <- err
+					}
+				}()
+			}
+
+			// Expect for AsLeader to not error for 2s
+			Consistently(errChan, "2s").ShouldNot(Receive())
+
+			// Shutdown goroutines
+			cancel()
+
+			var leader string
+
+			// Figure out leader
+			for _, runner := range executedBy {
+				if leader == "" {
+					leader = runner
+					continue
+				}
+
+				Expect(runner).To(Equal(leader))
+			}
+
+			// Verify HaveLeader against each cfg
+			for _, cfg := range cfgs {
+				if cfg.NodeName == leader {
+					Expect(n.HaveLeader(&cfg)).To(BeTrue())
+				} else {
+					Expect(n.HaveLeader(&cfg)).To(BeFalse())
+				}
+			}
+		})
 	})
 })
 
-func NewAsLeaderConfig(nodeName string, bucketName string) *AsLeaderConfig {
-	cfg := &AsLeaderConfig{
+func NewAsLeaderConfig(nodeName, bucketName, keyName string) AsLeaderConfig {
+	cfg := AsLeaderConfig{
 		Bucket:         bucketName,
+		Key:            keyName,
 		Description:    "AsLeader test",
-		BucketTTL:      time.Second * 10,
 		NodeName:       nodeName,
 		Looper:         director.NewTimedLooper(director.FOREVER, 200*time.Millisecond, make(chan error, 1)),
 		ElectionLooper: director.NewTimedLooper(director.FOREVER, 100*time.Millisecond, make(chan error, 1)),
