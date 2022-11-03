@@ -99,7 +99,11 @@ type INatty interface {
 	// AsLeader will execute opts.Func if and only if the node executing AsLeader
 	// acquires leader role. It will continue executing opts.Func until it loses
 	// leadership and another node becomes leader.
-	AsLeader(ctx context.Context, opts *AsLeaderConfig, f func() error) error
+	AsLeader(ctx context.Context, opts AsLeaderConfig, f func() error) error
+
+	// HaveLeader returns bool indicating whether node-name in given cfg is the
+	// leader for the cfg.Bucket and cfg.Key
+	HaveLeader(ctx context.Context, cfg *AsLeaderConfig) bool
 }
 
 type Config struct {
@@ -228,7 +232,12 @@ type Natty struct {
 	kvMutex        *sync.RWMutex
 	publisherMutex *sync.RWMutex
 	publisherMap   map[string]*Publisher
-	log            Logger
+
+	// key == asLeaderKey(bucket, key)
+	// value == node name
+	leaderMap   map[string]string
+	leaderMutex *sync.RWMutex
+	log         Logger
 }
 
 func New(cfg *Config) (*Natty, error) {
@@ -286,6 +295,8 @@ func New(cfg *Config) (*Natty, error) {
 		},
 		publisherMutex: &sync.RWMutex{},
 		publisherMap:   make(map[string]*Publisher),
+		leaderMap:      make(map[string]string),
+		leaderMutex:    &sync.RWMutex{},
 	}
 
 	// Inject logger (if provided)

@@ -3,7 +3,6 @@ natty
 [![Go Reference](https://pkg.go.dev/badge/github.com/batchcorp/natty.svg)](https://pkg.go.dev/github.com/batchcorp/natty)
 [![Go Report Card](https://goreportcard.com/badge/github.com/batchcorp/natty)](https://goreportcard.com/report/github.com/batchcorp/natty)
 
-
 An opinionated, [NATS](https://nats.io) Jetstream client wrapper lib for Go.
 
 Used by [plumber](https://github.com/batchcorp/plumber) and other Batch applications.
@@ -26,6 +25,58 @@ runs into an error.
 `Publish()` is nothing fancy.
 
 `New()` will perform the connect, create the stream and consumer.
+
+## HasLeader
+
+`natty` provides an easy way to execute a function only if the instance is the
+leader for a given bucket and key.
+
+Example:
+```go
+
+bucketName := "election-bucket"
+keyName := "election-key"
+
+n.AsLeader(context.Background(), natty.AsLeaderConfig{
+	Looper:   director.NewFreeLooper(director.Forever, make(error chan, 1)),
+	Bucket:   bucketName,
+	Key:      keyName,
+	NodeName: "node1"
+}, func() error {
+	fmt.Println("executed by node 1")
+})
+
+n.AsLeader(context.Background(), natty.AsLeaderConfig{
+	Looper:   director.NewFreeLooper(director.Forever, make(error chan, 1)),
+    Bucket:   bucketName, 
+    Key:      keyName,
+    NodeName: "node2"
+}, func() error {
+    fmt.Println("executed by node 2")
+})
+
+// Only one will be executed
+```
+
+`AsLeader` uses NATS k/v store to facilitate leader election.
+
+### Election Logic
+
+During first execution, all instances running `AsLeader()` on the same bucket 
+and key will attempt to `Create()` the leader key - only one will succeed as 
+`Create()` will error if a key already exists.
+
+On subsequent iterations, each `AsLeader()` will first check if it is the leader
+by reading the key in the bucket. If it is the leader, it will `Put()` the 
+cfg.Key with contents set to cfg.NodeName - the `Put()` will NOT error if the 
+key already exists.
+
+If the current leader is unable to `Put()` - it will try again next time until
+it either succeeds or the key is TTL'd by the bucket policy.
+
+When the bucket TTL is reached, the key will be deleted by NATS at which point,
+one of the `AsLeader()` instances `Create()` call will succeed and they will
+become the current leader.
 
 ## TLS NATS
 

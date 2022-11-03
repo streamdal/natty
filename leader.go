@@ -5,13 +5,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/relistan/go-director"
 )
 
 const (
-	DefaultBucketTTl       = time.Second * 10
-	ElectionLooperInterval = time.Second * 3
+	DefaultAsLeaderBucketTTL              = time.Second * 10
+	DefaultAsLeaderElectionLooperInterval = time.Second
 )
 
 var (
@@ -25,29 +26,39 @@ type AsLeaderConfig struct {
 	// Bucket specifies what K/V bucket will be used for leader election (required)
 	Bucket string
 
+	// Key specifies the keyname that the leader election will occur on (required)
+	Key string
+
 	// NodeName is the name used for this node (should be unique in cluster) (optional)
 	NodeName string
-
-	// BucketTTL specifies the TTL of values in the bucket (optional; default = 10s)
-	BucketTTL time.Duration
-
-	// ElectionLooper specifies the loop construct that will be used to perform leader election attempts (optional)
-	ElectionLooper director.Looper
 
 	// Description will set the bucket description (optional)
 	Description string
 
-	// Internal fields
-	haveLeader bool
+	// ElectionLooper allows you to override the used election looper (optional)
+	ElectionLooper director.Looper
+
+	// BucketTTL specifies the TTL policy the bucket should use (optional)
+	BucketTTL time.Duration
 }
 
-func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() error) error {
-	if err := validateAsLeaderConfig(cfg); err != nil {
-		return errors.Wrap(err, "unable to validate AsLeaderConfig")
+func (n *Natty) HaveLeader(ctx context.Context, cfg *AsLeaderConfig) bool {
+	nodeName, err := n.Get(ctx, cfg.Bucket, cfg.Key)
+	if err != nil {
+		if err == nats.ErrKeyNotFound {
+			return false
+		}
+
+		n.log.Errorf("unable to determine leader for '%s:%s': %s", cfg.Bucket, cfg.Key, err)
+		return false
 	}
 
-	if f == nil {
-		return errors.New("func is required")
+	return string(nodeName) == cfg.NodeName
+}
+
+func (n *Natty) AsLeader(ctx context.Context, cfg AsLeaderConfig, f func() error) error {
+	if err := validateAsLeaderArgs(&cfg, f); err != nil {
+		return errors.Wrap(err, "unable to validate AsLeader args")
 	}
 
 	// Attempt to create bucket; if bucket exists, verify that TTL matches
@@ -82,13 +93,15 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 
 	// Launch leader election in goroutine (leader election goroutine should quit when AsLeader is cancelled or exits)
 	go func() {
-		err := n.runLeaderElection(ctx, cfg)
+		err := n.runLeaderElection(ctx, &cfg)
 		if err != nil {
 			n.log.Errorf("%s: unable to run leader election: %v", cfg.NodeName, err)
 			errCh <- err
 
 			return
 		}
+
+		n.log.Debugf("%s: leader election goroutine exited", cfg.NodeName)
 	}()
 
 	n.log.Debugf("%s: waiting for goroutine to not error", cfg.NodeName)
@@ -106,8 +119,28 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 	// Leader election goroutine started; run main loop
 	n.log.Debugf("%s: leader election goroutine started; running main loop", cfg.NodeName)
 
+	var quit bool
+
 	cfg.Looper.Loop(func() error {
-		if !cfg.haveLeader {
+		if quit {
+			// Give looper time to catch up
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			n.log.Debugf("%s: AsLeader cancelled - exiting loop func", cfg.NodeName)
+
+			quit = true
+			cfg.Looper.Quit()
+
+			return nil
+		default:
+			// Continue
+		}
+
+		if !n.HaveLeader(ctx, &cfg) {
 			n.log.Debugf("%s: AsLeader: not leader", cfg.NodeName)
 			return nil
 		}
@@ -123,16 +156,20 @@ func (n *Natty) AsLeader(ctx context.Context, cfg *AsLeaderConfig, f func() erro
 		return nil
 	})
 
+	n.log.Debugf("%s: AsLeader func loop exited for '%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
+
 	return nil
 }
 
 func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) error {
 	var quit bool
 
+	var haveLeader bool
+
 	cfg.ElectionLooper.Loop(func() error {
 		// We are supposed to quit - give looper time to react to quit
 		if quit {
-			time.Sleep(time.Second)
+			time.Sleep(25 * time.Millisecond)
 			return nil
 		}
 
@@ -149,34 +186,42 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 		}
 
 		// Have leader - attempt to update key to increase TTL
-		if cfg.haveLeader {
-			if err := n.Put(ctx, cfg.Bucket, "leader", []byte(cfg.NodeName)); err != nil {
-				n.log.Errorf("%s: unable to update leader key: %v", cfg.NodeName, err)
-				cfg.haveLeader = false
+		if n.HaveLeader(ctx, cfg) {
+			if err := n.Put(ctx, cfg.Bucket, cfg.Key, []byte(cfg.NodeName), cfg.BucketTTL); err != nil {
+				// Something happened, try again next iteration - maybe we're
+				// still the leader.
+				n.log.Errorf("%s: unable to update leader key '%s:%s': %v", cfg.NodeName, cfg.Bucket, cfg.Key, err)
 
 				return nil
 			}
 
-			n.log.Debugf("%s: updated leader key", cfg.NodeName)
+			haveLeader = true
+
+			n.log.Debugf("%s: updated leader key '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 
 			return nil
+		} else {
+			if haveLeader {
+				n.log.Debugf("%s: lost leader", cfg.NodeName)
+			}
+
+			haveLeader = false
 		}
 
-		if err := n.Create(ctx, cfg.Bucket, "leader", []byte(cfg.NodeName)); err != nil {
+		if err := n.Create(ctx, cfg.Bucket, cfg.Key, []byte(cfg.NodeName), cfg.BucketTTL); err != nil {
 			if strings.Contains(err.Error(), "wrong last sequence") {
 				n.log.Debugf("%s: leader key already exists, ignoring", cfg.NodeName)
 				return nil
 			}
 
-			n.log.Errorf("%s: unable to create leader key: %v", cfg.NodeName, err)
+			n.log.Errorf("%s: unable to create leader key '%s:%s': %v", cfg.NodeName, cfg.Bucket, cfg.Key, err)
 
 			return nil
 		}
 
-		n.log.Debugf("%s: leader key created", cfg.NodeName)
+		n.log.Debugf("%s: got leader '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 
-		// Have leader
-		cfg.haveLeader = true
+		haveLeader = true
 
 		return nil
 	})
@@ -186,7 +231,7 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 	return nil
 }
 
-func validateAsLeaderConfig(cfg *AsLeaderConfig) error {
+func validateAsLeaderArgs(cfg *AsLeaderConfig, f func() error) error {
 	if cfg == nil {
 		return errors.New("AsLeaderConfig is required")
 	}
@@ -199,12 +244,20 @@ func validateAsLeaderConfig(cfg *AsLeaderConfig) error {
 		return errors.New("Bucket is required")
 	}
 
-	if cfg.BucketTTL == 0 {
-		cfg.BucketTTL = DefaultBucketTTl
+	if cfg.Key == "" {
+		return errors.New("Key is required")
+	}
+
+	if f == nil {
+		return errors.New("Function cannot be nil")
 	}
 
 	if cfg.ElectionLooper == nil {
-		cfg.ElectionLooper = director.NewTimedLooper(director.FOREVER, ElectionLooperInterval, make(chan error, 1))
+		cfg.ElectionLooper = director.NewTimedLooper(director.FOREVER, DefaultAsLeaderElectionLooperInterval, make(chan error, 1))
+	}
+
+	if cfg.BucketTTL == 0 {
+		cfg.BucketTTL = DefaultAsLeaderBucketTTL
 	}
 
 	return nil
