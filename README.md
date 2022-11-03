@@ -12,6 +12,17 @@ Used by [plumber](https://github.com/batchcorp/plumber) and other Batch applicat
 NATS allows you tweak a lot of things - create push or pull streams, durable or
 ephemeral consumers and all kinds of other settings.
 
+The library exposes several, opinionated, quality-of-life functionality such as:
+
+* Simplified publish/consume API *specifically* to be used with NATS-JS
+    * `Consume()` uses ONLY durable consumers (as we want kafka-like behavior)
+* Methods for interacting with key/value store in NATS
+* Concurrency / leader election functionality
+
+See the full interface [here](https://pkg.go.dev/github.com/batchcorp/natty#INatty).
+
+## Consume & Publish
+
 This library uses ONLY durable consumers and provides a two method API to interact
 with your NATS deployment:
 
@@ -21,10 +32,6 @@ with your NATS deployment:
 The `Consume()` will block and has to be cancelled via context. You can also
 pass an optional error channel that the lib will write to when the callback func
 runs into an error.
-
-`Publish()` is nothing fancy.
-
-`New()` will perform the connect, create the stream and consumer.
 
 ## HasLeader
 
