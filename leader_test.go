@@ -49,12 +49,12 @@ var _ = Describe("KV", func() {
 			cfg := NewAsLeaderConfig("batman", uuid.NewV4().String(), uuid.NewV4().String())
 
 			err := n.AsLeader(context.Background(), cfg, nil)
-			Expect(err.Error()).To(ContainSubstring("func is required"))
+			Expect(err.Error()).To(ContainSubstring("Function cannot be nil"))
 
 			// Quick, non-extensive check
 			cfg.Looper = nil
 
-			err = n.AsLeader(context.Background(), cfg, nil)
+			err = n.AsLeader(context.Background(), cfg, func() error { return nil })
 			Expect(err.Error()).To(ContainSubstring("Looper is required"))
 		})
 
@@ -108,6 +108,84 @@ var _ = Describe("KV", func() {
 
 			// For good measure, verify that expectedNode is actually set
 			Expect(expectedNode).ToNot(BeEmpty())
+		})
+
+		It("should become leader when initial leader fails", func() {
+			// 1. Launch two AsLeader's - one should become leader
+			// 2. Shutdown AsLeader 1 - AsLeader 2 should become leader
+			// 3. Shutdown AsLeader 2, start AsLeader 1 - AsLeader 1 should become leader
+
+			executedBy := make(map[string]int)
+
+			errChan := make(chan error, 10)
+			cancelCtx1, cancel1 := context.WithCancel(context.Background())
+			cancelCtx2, cancel2 := context.WithCancel(context.Background())
+			bucketName := uuid.NewV4().String()
+			keyName := uuid.NewV4().String()
+
+			cfg1 := NewAsLeaderConfig(fmt.Sprintf("node-1"), bucketName, keyName)
+
+			// Start node 1
+			startupLeader(cancelCtx1, n, &cfg1, errChan, func() error {
+				executedBy[cfg1.NodeName] += 1
+				return nil
+			})
+
+			// Sleep so that node1 is guaranteed to become leader
+			time.Sleep(time.Second)
+
+			cfg2 := NewAsLeaderConfig(fmt.Sprintf("node-2"), bucketName, keyName)
+
+			// Start node 2
+			startupLeader(cancelCtx2, n, &cfg2, errChan, func() error {
+				executedBy[cfg2.NodeName] += 1
+				return nil
+			})
+
+			// Expect for AsLeader to not error for 2s
+			Consistently(errChan, "2s").ShouldNot(Receive())
+
+			// Expect only one leader to have ever executed
+			Expect(len(executedBy)).To(Equal(1), "only one leader should have executed the func")
+			Expect(executedBy["node-1"]).ToNot(BeNil())
+
+			// Shutdown AsLeader 1
+			cancel1()
+
+			// Clear the map to have a clean state
+			executedBy = make(map[string]int)
+
+			// Give a moment for as leader 1 to exit
+			time.Sleep(2 * time.Second)
+
+			// Expect leader 2 to have become leader and executed func
+			Expect(len(executedBy)).To(Equal(1), "only one leader should have executed the func")
+			Expect(executedBy["node-2"]).ToNot(BeNil())
+
+			// Shutdown AsLeader 2, startup AsLeader 1
+			cancel2()
+
+			// Give AsLeader 2 to exit
+			time.Sleep(2 * time.Second)
+
+			// Reset executedBy again
+			executedBy = make(map[string]int)
+
+			cancelCtx1, cancel1 = context.WithCancel(context.Background())
+
+			startupLeader(cancelCtx1, n, &cfg1, errChan, func() error {
+				executedBy[cfg1.NodeName] += 1
+				return nil
+			})
+
+			// Give AsLeader 1 to exec a few times
+			time.Sleep(2 * time.Second)
+
+			// Assert AsLeader 1 had become leader again
+			Expect(len(executedBy)).To(Equal(1), "only one leader should have executed the func")
+			Expect(executedBy["node-1"]).ToNot(BeNil())
+
+			cancel1()
 		})
 
 		It("should not exec function when not leader", func() {
@@ -212,7 +290,7 @@ var _ = Describe("KV", func() {
 		It("should work with existing bucket and same TTL", func() {
 			bucketName := uuid.NewV4().String()
 			keyName := uuid.NewV4().String()
-			bucketTTL := AsLeaderBucketTTL
+			bucketTTL := time.Second
 
 			// Create bucket manually with TTL
 			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
@@ -229,6 +307,7 @@ var _ = Describe("KV", func() {
 			cancelCtx, cancel := context.WithCancel(context.Background())
 
 			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
+			cfg.BucketTTL = bucketTTL
 
 			go func() {
 				defer GinkgoRecover()
@@ -335,15 +414,16 @@ var _ = Describe("KV", func() {
 					continue
 				}
 
+				// All other execs should be done by the same leader
 				Expect(runner).To(Equal(leader))
 			}
 
 			// Verify HaveLeader against each cfg
 			for _, cfg := range cfgs {
 				if cfg.NodeName == leader {
-					Expect(n.HaveLeader(&cfg)).To(BeTrue())
+					Expect(n.HaveLeader(context.Background(), &cfg)).To(BeTrue())
 				} else {
-					Expect(n.HaveLeader(&cfg)).To(BeFalse())
+					Expect(n.HaveLeader(context.Background(), &cfg)).To(BeFalse())
 				}
 			}
 		})
@@ -352,15 +432,34 @@ var _ = Describe("KV", func() {
 
 func NewAsLeaderConfig(nodeName, bucketName, keyName string) AsLeaderConfig {
 	cfg := AsLeaderConfig{
-		Bucket:         bucketName,
-		Key:            keyName,
-		Description:    "AsLeader test",
-		NodeName:       nodeName,
-		Looper:         director.NewTimedLooper(director.FOREVER, 200*time.Millisecond, make(chan error, 1)),
-		ElectionLooper: director.NewTimedLooper(director.FOREVER, 100*time.Millisecond, make(chan error, 1)),
+		Bucket:      bucketName,
+		Key:         keyName,
+		Description: "AsLeader test",
+		NodeName:    nodeName,
+
+		// Using a fast looper for quicker tests
+		Looper: director.NewTimedLooper(director.FOREVER, 200*time.Millisecond, make(chan error, 1)),
+
+		// Overriding default looper for quicker tests
+		ElectionLooper: director.NewTimedLooper(director.FOREVER, 25*time.Millisecond, make(chan error, 1)),
+
+		// Overriding bucket TTL for quicker tests
+		BucketTTL: 250 * time.Millisecond,
 	}
 
 	usedBuckets = append(usedBuckets, cfg.Bucket)
 
 	return cfg
+}
+
+func startupLeader(ctx context.Context, n INatty, cfg *AsLeaderConfig, errChan chan error, f func() error) {
+	go func() {
+		defer GinkgoRecover()
+
+		err := n.AsLeader(ctx, *cfg, f)
+
+		if err != nil {
+			errChan <- err
+		}
+	}()
 }

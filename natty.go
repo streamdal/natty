@@ -103,7 +103,7 @@ type INatty interface {
 
 	// HaveLeader returns bool indicating whether node-name in given cfg is the
 	// leader for the cfg.Bucket and cfg.Key
-	HaveLeader(cfg *AsLeaderConfig) bool
+	HaveLeader(ctx context.Context, cfg *AsLeaderConfig) bool
 }
 
 type Config struct {
