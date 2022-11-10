@@ -30,7 +30,7 @@ type AsLeaderConfig struct {
 	// Key specifies the keyname that the leader election will occur on (required)
 	Key string
 
-	// NodeName is the name used for this node (should be unique in cluster) (optional)
+	// NodeName is the name used for this node; should be unique in cluster (required)
 	NodeName string
 
 	// Description will set the bucket description (optional)
@@ -257,6 +257,10 @@ func validateAsLeaderArgs(cfg *AsLeaderConfig, f func() error) error {
 
 	if cfg.Key == "" {
 		return errors.New("Key is required")
+	}
+
+	if cfg.NodeName == "" {
+		return errors.New("NodeName is required")
 	}
 
 	if f == nil {

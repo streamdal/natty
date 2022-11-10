@@ -427,6 +427,97 @@ var _ = Describe("KV", func() {
 				}
 			}
 		})
+
+		It("validateAsLeaderConfig", func() {
+			type AsLeaderConfigEntry struct {
+				Config        *AsLeaderConfig
+				Description   string
+				ShouldError   bool
+				ErrorContains string
+			}
+
+			tests := []AsLeaderConfigEntry{
+				{
+					Config:        nil,
+					Description:   "nil config should fail",
+					ShouldError:   true,
+					ErrorContains: "AsLeaderConfig is required",
+				},
+				{
+					Config:        &AsLeaderConfig{},
+					Description:   "non filled out config",
+					ShouldError:   true,
+					ErrorContains: "Looper is required",
+				},
+				{
+					Config: &AsLeaderConfig{
+						Looper:   director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+						Bucket:   "",
+						Key:      "test",
+						NodeName: "test",
+					},
+					Description:   "empty bucket name should fail",
+					ShouldError:   true,
+					ErrorContains: "Bucket is required",
+				},
+				{
+					Config: &AsLeaderConfig{
+						Looper:   director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+						Bucket:   "test",
+						Key:      "",
+						NodeName: "test",
+					},
+					Description:   "empty key name should fail",
+					ShouldError:   true,
+					ErrorContains: "Key is required",
+				},
+				{
+					Config: &AsLeaderConfig{
+						Looper:   director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+						Bucket:   "test",
+						Key:      "test",
+						NodeName: "",
+					},
+					Description:   "empty node name should fail",
+					ShouldError:   true,
+					ErrorContains: "NodeName is required",
+				},
+				{
+					Config: &AsLeaderConfig{
+						Looper:   nil,
+						Bucket:   "test",
+						Key:      "test",
+						NodeName: "test",
+					},
+					Description:   "should error with nil looper",
+					ShouldError:   true,
+					ErrorContains: "Looper is required",
+				},
+				{
+					Config: &AsLeaderConfig{
+						Looper:   director.NewFreeLooper(director.FOREVER, make(chan error, 1)),
+						Bucket:   "test",
+						Key:      "test",
+						NodeName: "test",
+					},
+					Description: "should not error with all required fields filled out",
+					ShouldError: false,
+				},
+			}
+
+			for _, test := range tests {
+				if test.ShouldError {
+					err := validateAsLeaderArgs(test.Config, func() error { return nil })
+
+					Expect(err).To(HaveOccurred(), test.Description)
+					Expect(err.Error()).To(ContainSubstring(test.ErrorContains), test.Description)
+				} else {
+					err := validateAsLeaderArgs(test.Config, func() error { return nil })
+
+					Expect(err).ToNot(HaveOccurred(), test.Description)
+				}
+			}
+		})
 	})
 })
 
