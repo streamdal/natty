@@ -421,9 +421,9 @@ var _ = Describe("KV", func() {
 			// Verify HaveLeader against each cfg
 			for _, cfg := range cfgs {
 				if cfg.NodeName == leader {
-					Expect(n.HaveLeader(context.Background(), &cfg)).To(BeTrue())
+					Expect(n.HaveLeader(context.Background(), cfg.NodeName, cfg.Bucket, cfg.Key)).To(BeTrue())
 				} else {
-					Expect(n.HaveLeader(context.Background(), &cfg)).To(BeFalse())
+					Expect(n.HaveLeader(context.Background(), cfg.NodeName, cfg.Bucket, cfg.Key)).To(BeFalse())
 				}
 			}
 		})
