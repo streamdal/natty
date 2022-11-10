@@ -2,6 +2,7 @@ package natty
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -42,18 +43,28 @@ type AsLeaderConfig struct {
 	BucketTTL time.Duration
 }
 
-func (n *Natty) HaveLeader(ctx context.Context, cfg *AsLeaderConfig) bool {
-	nodeName, err := n.Get(ctx, cfg.Bucket, cfg.Key)
+func (n *Natty) GetLeader(ctx context.Context, bucketName, keyName string) (string, error) {
+	currentLeader, err := n.Get(ctx, bucketName, keyName)
 	if err != nil {
 		if err == nats.ErrKeyNotFound {
-			return false
+			return "", err
 		}
 
-		n.log.Errorf("unable to determine leader for '%s:%s': %s", cfg.Bucket, cfg.Key, err)
+		n.log.Errorf("unable to determine leader for '%s:%s': %s", bucketName, keyName, err)
+
+		return "", fmt.Errorf("unable to determine leader for '%s:%s': %s", bucketName, keyName, err)
+	}
+
+	return string(currentLeader), nil
+}
+
+func (n *Natty) HaveLeader(ctx context.Context, nodeName, bucketName, keyName string) bool {
+	currentLeader, err := n.GetLeader(ctx, bucketName, keyName)
+	if err != nil {
 		return false
 	}
 
-	return string(nodeName) == cfg.NodeName
+	return currentLeader == nodeName
 }
 
 func (n *Natty) AsLeader(ctx context.Context, cfg AsLeaderConfig, f func() error) error {
@@ -140,7 +151,7 @@ func (n *Natty) AsLeader(ctx context.Context, cfg AsLeaderConfig, f func() error
 			// Continue
 		}
 
-		if !n.HaveLeader(ctx, &cfg) {
+		if !n.HaveLeader(ctx, cfg.NodeName, cfg.Bucket, cfg.Key) {
 			n.log.Debugf("%s: AsLeader: not leader", cfg.NodeName)
 			return nil
 		}
@@ -186,7 +197,7 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 		}
 
 		// Have leader - attempt to update key to increase TTL
-		if n.HaveLeader(ctx, cfg) {
+		if n.HaveLeader(ctx, cfg.NodeName, cfg.Bucket, cfg.Key) {
 			if err := n.Put(ctx, cfg.Bucket, cfg.Key, []byte(cfg.NodeName), cfg.BucketTTL); err != nil {
 				// Something happened, try again next iteration - maybe we're
 				// still the leader.
