@@ -213,7 +213,7 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 			return nil
 		} else {
 			if haveLeader {
-				n.log.Debugf("%s: lost leader", cfg.NodeName)
+				n.log.Infof("%s: lost leader '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 			}
 
 			haveLeader = false
@@ -230,7 +230,7 @@ func (n *Natty) runLeaderElection(ctx context.Context, cfg *AsLeaderConfig) erro
 			return nil
 		}
 
-		n.log.Debugf("%s: got leader '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
+		n.log.Infof("%s: became leader '%s:%s'", cfg.NodeName, cfg.Bucket, cfg.Key)
 
 		haveLeader = true
 
