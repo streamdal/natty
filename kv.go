@@ -153,6 +153,21 @@ func (n *Natty) CreateBucket(_ context.Context, name string, ttl time.Duration, 
 	return nil
 }
 
+// WatchBucket returns an instance of nats.KeyWatcher for the given bucket
+func (n *Natty) WatchBucket(ctx context.Context, bucket string) (nats.KeyWatcher, error) {
+	b, err := n.getBucket(ctx, bucket, false, 0)
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to watch bucket '%s'", bucket)
+	}
+
+	watcher, err := b.WatchAll()
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to watch bucket '%s'", bucket)
+	}
+
+	return watcher, nil
+}
+
 // getBucket will either fetch a known bucket or create it if it doesn't exist
 func (n *Natty) getBucket(_ context.Context, bucket string, create bool, ttl time.Duration) (nats.KeyValue, error) {
 	// NOTE: Context usage for K/V operations is not available in NATS (yet)

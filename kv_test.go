@@ -275,6 +275,30 @@ var _ = Describe("KV", func() {
 			Expect(keys).To(BeNil())
 		})
 	})
+
+	Describe("Watch", func() {
+		It("should receive updates to keys", func() {
+			bucket, _, _ := NewKVSet()
+
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:      bucket,
+				Description: "tmp bucket for testing WatchBucket()",
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			watcher, err := n.WatchBucket(context.Background(), bucket)
+			Expect(err).ToNot(HaveOccurred())
+
+			ch := watcher.Updates()
+			Eventually(ch, "100ms").Should(Receive())
+
+			_, putErr := kv.Put(uuid.NewV4().String(), []byte("test"))
+			Expect(putErr).ToNot(HaveOccurred())
+
+		})
+	})
 })
 
 func NewKVSet() (bucket string, key string, value []byte) {
