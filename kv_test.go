@@ -61,6 +61,37 @@ var _ = Describe("KV", func() {
 		})
 	})
 
+	Describe("CreateBucket", func() {
+		It("should validate args before creating bucket", func() {
+			type Case struct {
+				Condition   string
+				Bucket      string
+				TTL         time.Duration
+				ExpectedErr string
+				Replicas    int
+				ShouldError bool
+			}
+
+			cases := []Case{
+				{Condition: "bucket name is required", Bucket: "", ExpectedErr: "bucket name cannot be empty", ShouldError: true, Replicas: 1},
+				{Condition: "replica must be >0", Bucket: "test", ExpectedErr: "replicaCount must be greater than 0", ShouldError: true, Replicas: 0},
+				{Condition: "bad bucket name", Bucket: "bad bucket name", ExpectedErr: "can only contain alphanumeric", ShouldError: true, Replicas: 1},
+				{Condition: "happy path", Bucket: "test", ShouldError: false, Replicas: 1},
+			}
+
+			for _, c := range cases {
+				err := n.CreateBucket(nil, c.Bucket, c.TTL, c.Replicas)
+
+				if c.ShouldError {
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring(c.ExpectedErr))
+				} else {
+					Expect(err).ToNot(HaveOccurred())
+				}
+			}
+		})
+	})
+
 	Describe("Create", func() {
 		It("should auto-create bucket + create kv entry", func() {
 			bucket, key, value := NewKVSet()
