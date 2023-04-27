@@ -112,9 +112,6 @@ github.com/relistan/go-director
 # github.com/satori/go.uuid v1.2.0
 ## explicit
 github.com/satori/go.uuid
-# github.com/sirupsen/logrus v1.7.0
-## explicit; go 1.13
-github.com/sirupsen/logrus
 # github.com/tinylib/msgp v1.1.2
 ## explicit
 github.com/tinylib/msgp/msgp
