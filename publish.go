@@ -178,7 +178,7 @@ func buildBatch(slice []*message, entriesPerBatch int) [][]*message {
 func (p *Publisher) runBatchPublisher(ctx context.Context) {
 	var quit bool
 
-	p.log.Debugf("publisher id '%s' exiting", p.Subject)
+	p.log.Debugf("publisher id '%s' starting", p.Subject)
 
 	lastArrivedAt := time.Now()
 
@@ -206,6 +206,7 @@ func (p *Publisher) runBatchPublisher(ctx context.Context) {
 		case <-p.ServiceShutdownContext.Done():
 			p.log.Debugf("publisher id '%s' received app shutdown signal, waiting for batch to be empty", p.Subject)
 			quit = true
+			p.looper.Quit()
 		default:
 			// NOOP
 		}
