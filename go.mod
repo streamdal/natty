@@ -1,4 +1,4 @@
-module github.com/batchcorp/natty
+module github.com/streamdal/natty
 
 go 1.18
 
