@@ -13,7 +13,6 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 )
 
 const (
@@ -187,7 +186,7 @@ var _ = Describe("Natty", func() {
 			}()
 
 			// Produce 5 events
-			err = Publish(cfg, 5, subj, uuid.NewV4().String())
+			err = Publish(cfg, 5, subj, MustNewUUID())
 			Expect(err).ToNot(HaveOccurred())
 
 			// Give Consume() enough time to consume
@@ -326,7 +325,7 @@ var _ = Describe("Natty", func() {
 			}()
 
 			// Produce 5 events
-			err = Publish(cfg, 5, subj, uuid.NewV4().String())
+			err = Publish(cfg, 5, subj, MustNewUUID())
 			Expect(err).ToNot(HaveOccurred())
 
 			// Give Consume() enough time to consume
@@ -366,7 +365,7 @@ var _ = Describe("Natty", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			payload := uuid.NewV4().String()
+			payload := MustNewUUID()
 
 			cfg := NewConfig()
 
@@ -457,7 +456,7 @@ var _ = Describe("Natty", func() {
 			n, err := New(cfg)
 			Expect(err).ToNot(HaveOccurred())
 
-			name := "ingest-" + uuid.NewV4().String()
+			name := "ingest-" + MustNewUUID()
 			err = n.CreateStream(context.Background(), name, []string{name})
 			Expect(err).ToNot(HaveOccurred())
 
@@ -479,7 +478,7 @@ var _ = Describe("Natty", func() {
 			n, err := New(cfg)
 			Expect(err).ToNot(HaveOccurred())
 
-			streamName := "ingest-" + uuid.NewV4().String()
+			streamName := "ingest-" + MustNewUUID()
 			consumerName := streamName + "-consumer"
 
 			err = n.CreateStream(context.Background(), streamName, []string{streamName})

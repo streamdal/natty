@@ -9,7 +9,6 @@ import (
 	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	uuid "github.com/satori/go.uuid"
 )
 
 var _ = Describe("KV", func() {
@@ -273,7 +272,7 @@ var _ = Describe("KV", func() {
 			numKeys := rand.Intn(20) + 1 // + 1 to avoid 0
 
 			for i := 0; i < numKeys; i++ {
-				_, putErr := kv.Put(uuid.NewV4().String(), []byte("test"))
+				_, putErr := kv.Put(MustNewUUID(), []byte("test"))
 				Expect(putErr).ToNot(HaveOccurred())
 			}
 
@@ -300,7 +299,7 @@ var _ = Describe("KV", func() {
 		})
 
 		It("should error if bucket does not exist", func() {
-			keys, err := n.Keys(context.Background(), uuid.NewV4().String())
+			keys, err := n.Keys(context.Background(), MustNewUUID())
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(Equal(nats.ErrBucketNotFound))
 			Expect(keys).To(BeNil())
@@ -325,7 +324,7 @@ var _ = Describe("KV", func() {
 			ch := watcher.Updates()
 			Eventually(ch, "100ms").Should(Receive())
 
-			_, putErr := kv.Put(uuid.NewV4().String(), []byte("test"))
+			_, putErr := kv.Put(MustNewUUID(), []byte("test"))
 			Expect(putErr).ToNot(HaveOccurred())
 
 		})
@@ -338,7 +337,7 @@ var _ = Describe("KV", func() {
 				Description: "tmp bucket for testing WatchBucket()",
 			})
 
-			key := uuid.NewV4().String()
+			key := MustNewUUID()
 
 			_, putErr := kv.Put(key, []byte("test"))
 			Expect(putErr).ToNot(HaveOccurred())
@@ -360,9 +359,9 @@ var _ = Describe("KV", func() {
 })
 
 func NewKVSet() (bucket string, key string, value []byte) {
-	bucket = uuid.NewV4().String()
-	key = uuid.NewV4().String()
-	value = []byte(uuid.NewV4().String())
+	bucket = MustNewUUID()
+	key = MustNewUUID()
+	value = []byte(MustNewUUID())
 
 	testBuckets = append(testBuckets, bucket)
 
