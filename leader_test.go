@@ -10,7 +10,6 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/relistan/go-director"
-	uuid "github.com/satori/go.uuid"
 )
 
 var (
@@ -46,7 +45,7 @@ var _ = Describe("KV", func() {
 
 	Describe("AsLeader", func() {
 		It("should error with bad config", func() {
-			cfg := NewAsLeaderConfig("batman", uuid.NewV4().String(), uuid.NewV4().String())
+			cfg := NewAsLeaderConfig("batman", MustNewUUID(), MustNewUUID())
 
 			err := n.AsLeader(context.Background(), cfg, nil)
 			Expect(err.Error()).To(ContainSubstring("Function cannot be nil"))
@@ -63,8 +62,8 @@ var _ = Describe("KV", func() {
 
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 
 			for i := 0; i < 3; i++ {
 				cfg := NewAsLeaderConfig(fmt.Sprintf("node-%d", i), bucketName, keyName)
@@ -120,8 +119,8 @@ var _ = Describe("KV", func() {
 			errChan := make(chan error, 10)
 			cancelCtx1, cancel1 := context.WithCancel(context.Background())
 			cancelCtx2, cancel2 := context.WithCancel(context.Background())
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 
 			cfg1 := NewAsLeaderConfig(fmt.Sprintf("node-1"), bucketName, keyName)
 
@@ -194,8 +193,8 @@ var _ = Describe("KV", func() {
 
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 
 			cfg := NewAsLeaderConfig("node-1", bucketName, keyName)
 
@@ -251,8 +250,8 @@ var _ = Describe("KV", func() {
 
 		It("should auto-create bucket", func() {
 			// Verify bucket doesn't exist
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 
 			kv, err := n.js.KeyValue(bucketName)
 			Expect(err).To(Equal(nats.ErrBucketNotFound))
@@ -288,8 +287,8 @@ var _ = Describe("KV", func() {
 		})
 
 		It("should work with existing bucket and same TTL", func() {
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 			bucketTTL := time.Second
 
 			// Create bucket manually with TTL
@@ -329,8 +328,8 @@ var _ = Describe("KV", func() {
 		})
 
 		It("should error when pre-existing bucket has different TTL", func() {
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 			bucketTTL := 321 * time.Second
 
 			// Create bucket manually with TTL
@@ -374,8 +373,8 @@ var _ = Describe("KV", func() {
 
 			errChan := make(chan error, 10)
 			cancelCtx, cancel := context.WithCancel(context.Background())
-			bucketName := uuid.NewV4().String()
-			keyName := uuid.NewV4().String()
+			bucketName := MustNewUUID()
+			keyName := MustNewUUID()
 			cfgs := make(map[string]AsLeaderConfig)
 
 			for i := 0; i < 3; i++ {

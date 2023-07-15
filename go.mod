@@ -3,12 +3,12 @@ module github.com/batchcorp/natty
 go 1.18
 
 require (
+	github.com/gofrs/uuid v4.4.0+incompatible
 	github.com/nats-io/nats.go v1.27.1
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.27.8
 	github.com/pkg/errors v0.9.1
 	github.com/relistan/go-director v0.0.0-20200406104025-dbbf5d95248d
-	github.com/satori/go.uuid v1.2.0
 	gopkg.in/DataDog/dd-trace-go.v1 v1.37.1
 )
 
