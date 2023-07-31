@@ -91,6 +91,54 @@ var _ = Describe("KV", func() {
 		})
 	})
 
+	Describe("Refresh", func() {
+		It("should refresh the TTL for a key", func() {
+			bucket, key, value := NewKVSet()
+			ttl := time.Second
+
+			// Create bucket
+			_, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket: bucket,
+				TTL:    ttl,
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+
+			// Create entry
+			err = n.Create(nil, bucket, key, value)
+			Expect(err).ToNot(HaveOccurred())
+
+			// We are waiting for half of the TTL to occur
+			time.Sleep(500 * time.Millisecond)
+
+			// Refresh
+			err = n.Refresh(nil, bucket, key)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Let's wait to get past the 1s TTL
+			time.Sleep(600 * time.Millisecond)
+
+			// We have *definitely* slept for longer than TTL - value should still be there
+			// Get entry
+			data, err := n.Get(nil, bucket, key)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(data).To(Equal(value))
+		})
+
+		It("should error if bucket or key does not exist", func() {
+			Expect(n.Refresh(nil, "non-existent-bucket", "non-existent-key")).To(HaveOccurred())
+
+			// Create bucket, but no key
+			bucket, _, _ := NewKVSet()
+			Expect(n.CreateBucket(nil, bucket, 10*time.Second, 1)).ToNot(HaveOccurred())
+
+			Expect(n.Refresh(nil, bucket, "non-existent-key")).To(HaveOccurred())
+		})
+
+		It("should error if revision ID does not match the revision ID we expect", func() {
+		})
+	})
+
 	Describe("Create", func() {
 		It("should auto-create bucket + create kv entry", func() {
 			bucket, key, value := NewKVSet()
