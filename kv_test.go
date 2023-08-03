@@ -354,7 +354,7 @@ var _ = Describe("KV", func() {
 		})
 	})
 
-	Describe("Watch", func() {
+	Describe("WatchBucket", func() {
 		It("should receive updates when a key is added", func() {
 			bucket, _, _ := NewKVSet()
 
@@ -397,11 +397,107 @@ var _ = Describe("KV", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			ch := watcher.Updates()
+
+			// TODO: This is not enough; first received value could be nil which
+			// will produce a false positive test
 			Eventually(ch, "100ms").Should(Receive())
 
 			delErr := kv.Delete(key)
 			Expect(delErr).ToNot(HaveOccurred())
 
+		})
+	})
+
+	Describe("WatchKey", func() {
+		It("should receive updates when key is updated", func() {
+			bucket, key, _ := NewKVSet()
+
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:      bucket,
+				Description: "tmp bucket for testing WatchBucket()",
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			watcher, err := n.WatchKey(context.Background(), bucket, key)
+			Expect(err).ToNot(HaveOccurred())
+
+			ch := watcher.Updates()
+
+			// Read for 100ms; should receive a Put operation
+			go func() {
+				defer GinkgoRecover()
+
+			MAIN:
+				for {
+					select {
+					case v := <-ch:
+						if v == nil {
+							continue
+						}
+
+						// Not nil, check operation
+						Expect(v.Operation()).To(Equal(nats.KeyValuePut))
+						Expect(v.Value()).To(Equal([]byte("test")))
+					case <-time.After(time.Second):
+						Fail("timed out waiting for put")
+						break MAIN
+					}
+				}
+			}()
+
+			// Wait for watcher to start (hopefully 100ms is enough; this is flakey)
+			time.Sleep(time.Millisecond * 100)
+
+			_, putErr := kv.Put(key, []byte("test"))
+			Expect(putErr).ToNot(HaveOccurred())
+		})
+
+		It("should receive updates when a key is deleted", func() {
+			bucket, key, _ := NewKVSet()
+
+			kv, err := n.js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:      bucket,
+				Description: "tmp bucket for testing WatchBucket()",
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kv).ToNot(BeNil())
+
+			watcher, err := n.WatchKey(context.Background(), bucket, key)
+			Expect(err).ToNot(HaveOccurred())
+
+			ch := watcher.Updates()
+
+			// Read for 100ms; should receive a Put operation
+			go func() {
+				defer GinkgoRecover()
+
+			MAIN:
+				for {
+					select {
+					case v := <-ch:
+						if v == nil {
+							continue
+						}
+
+						Eventually(v.Operation()).Should(Equal(nats.KeyValueDelete))
+					case <-time.After(time.Second):
+						Fail("timed out waiting for delete")
+						break MAIN
+					}
+				}
+			}()
+
+			// Wait for watcher to start (hopefully 100ms is enough; this is flakey)
+			time.Sleep(time.Millisecond * 100)
+
+			_, putErr := kv.Put(key, []byte("test"))
+			Expect(putErr).ToNot(HaveOccurred())
+
+			delErr := kv.Delete(key)
+			Expect(delErr).ToNot(HaveOccurred())
 		})
 	})
 })
