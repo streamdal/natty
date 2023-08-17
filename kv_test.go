@@ -278,6 +278,31 @@ var _ = Describe("KV", func() {
 		})
 	})
 
+	Describe("Status", func() {
+		It("should return correct status for the bucket", func() {
+			bucket := MustNewUUID()
+
+			numKeys := uint64(100)
+
+			// Add some kvs
+			for i := uint64(0); i < numKeys; i++ {
+				key := MustNewUUID()
+				value := []byte(MustNewUUID())
+
+				err := n.Create(nil, bucket, key, value)
+				Expect(err).ToNot(HaveOccurred())
+			}
+
+			// Now fetch the status
+			status, err := n.Status(nil, bucket)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(status).ToNot(BeNil())
+			Expect(status.Values()).To(Equal(numKeys))
+			Expect(status.Bytes()).To(BeNumerically(">", 0))
+		})
+	})
+
 	Describe("Delete", func() {
 		It("should delete the value for a key", func() {
 			bucket, key, value := NewKVSet()
